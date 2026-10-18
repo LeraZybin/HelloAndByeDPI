@@ -1,0 +1,53 @@
+name: Desktop builds
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  macos:
+    runs-on: macos-14
+    strategy:
+      matrix:
+        arch: [x86_64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/fetch_dependencies.py
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.arch == 'arm64' && '11.0' || '10.13' }}
+      - run: cmake --build build -j 3
+      - if: matrix.arch == 'arm64'
+        run: ctest --test-dir build --output-on-failure && python3 tests/proxy_smoke.py build/HelloAndByeDPI.app/Contents/MacOS/ciadpi
+      - if: matrix.arch == 'arm64'
+        run: python3 tests/probe_integration.py build/ciadpi build/probe_integration
+      - run: python3 scripts/package_macos.py build/HelloAndByeDPI.app build/HelloAndByeDPI-macos-${{ matrix.arch }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HelloAndByeDPI-macos-${{ matrix.arch }}
+          path: build/HelloAndByeDPI-macos-*.zip
+  windows:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        include:
+          - {arch: x64, msystem: MINGW64, prefix: mingw-w64-x86_64}
+          - {arch: x86, msystem: MINGW32, prefix: mingw-w64-i686}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            ${{ matrix.prefix }}-gcc
+            ${{ matrix.prefix }}-cmake
+            ${{ matrix.prefix }}-ninja
+            ${{ matrix.prefix }}-python
+      - run: python scripts/fetch_dependencies.py
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j 3
+      - run: ctest --test-dir build --output-on-failure && python tests/proxy_smoke.py build/ciadpi.exe
+      - run: python scripts/fetch_windows_runtime.py build ${{ matrix.arch }}
+      - run: python scripts/package_windows.py build build/HelloAndByeDPI-windows-${{ matrix.arch }}.zip ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HelloAndByeDPI-windows-${{ matrix.arch }}
+          path: build/HelloAndByeDPI-windows-${{ matrix.arch }}.zip

@@ -1,0 +1,7 @@
+Policy and site-list data from romanvht/ByeByeDPI.
+https://github.com/romanvht/ByeByeDPI
+Pinned source commit: 96a3c1ff555043d915af814aa4f0e9a572c89aba
+Original files: app/src/main/assets/proxytest_*
+The 60 strategy lines and eight site lists are distributed unchanged.
+These data files are covered by the upstream GNU GPL version 3; see LICENSE.
+The desktop tester is a new implementation, not a port of the Android code.

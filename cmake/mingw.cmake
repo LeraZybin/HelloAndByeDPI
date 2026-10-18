@@ -1,0 +1,12 @@
+# cmake -S . -B build-windows-x64 -DCMAKE_TOOLCHAIN_FILE=cmake/mingw.cmake
+# Use -DMINGW_ARCH=i686 for 32-bit Windows.
+set(CMAKE_SYSTEM_NAME Windows)
+set(MINGW_ARCH x86_64 CACHE STRING "MinGW architecture: x86_64 or i686")
+set(CMAKE_C_COMPILER ${MINGW_ARCH}-w64-mingw32-gcc)
+set(CMAKE_CXX_COMPILER ${MINGW_ARCH}-w64-mingw32-g++)
+set(CMAKE_RC_COMPILER ${MINGW_ARCH}-w64-mingw32-windres)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-static -static-libgcc -static-libstdc++")

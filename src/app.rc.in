@@ -1,0 +1,2 @@
+#include "wx/msw/wx.rc"
+IDI_APP_ICON ICON "@CMAKE_SOURCE_DIR@/assets/icon.ico"
