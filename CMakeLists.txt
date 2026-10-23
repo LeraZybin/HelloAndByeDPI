@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ByeDPI_Desktop VERSION 0.6.4 LANGUAGES C CXX)
+project(ByeDPI_Desktop VERSION 0.6.5 LANGUAGES C CXX)
 option(BYEDPI_TEST_BUILD "Mark the application as a test build" OFF)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -16,10 +16,10 @@ jobs:
         run: ctest --test-dir build --output-on-failure && python3 tests/proxy_smoke.py build/HelloAndByeDPI.app/Contents/MacOS/ciadpi
       - if: matrix.arch == 'arm64'
         run: python3 tests/probe_integration.py build/ciadpi build/probe_integration
-      - run: python3 scripts/package_macos.py build/HelloAndByeDPI.app build/HelloAndByeDPI-macos-${{ matrix.arch }}.zip
+      - run: python3 scripts/package_macos.py build/HelloAndByeDPI.app build/HelloAndByeDPI-macos-${{ matrix.arch == 'arm64' && 'apple-silicon' || 'intel' }}.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: HelloAndByeDPI-macos-${{ matrix.arch }}
+          name: HelloAndByeDPI-macos-${{ matrix.arch == 'arm64' && 'apple-silicon' || 'intel' }}
           path: build/HelloAndByeDPI-macos-*.zip
   windows:
     runs-on: windows-2022

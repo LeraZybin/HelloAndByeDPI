@@ -1,6 +1,6 @@
 # HelloAndByeDPI
 
-Current version: **0.6.4**.
+Current version: **0.6.5**.
 
 HelloAndByeDPI is a native desktop GUI for [ByeDPI](https://github.com/hufrea/byedpi). It runs a local anti-DPI proxy, applies the required network settings automatically, and restores the previous settings when disconnected.
 
@@ -49,7 +49,11 @@ Test results depend on the provider, network, and active DPI equipment. A strate
 - Recovery of network settings after an interrupted session.
 - Session logs for troubleshooting.
 
-On Windows, the log is written to `HelloAndByeDPI.log` beside the executable.
+Logging is off by default. Enable **Enable logging** in the main window or strategy tester while disconnected to collect troubleshooting logs. The setting is shared and saved. On Windows, the log is written to `HelloAndByeDPI.log` beside the executable.
+
+## Website
+
+The [download website](https://LeraZybin.github.io/HelloAndByeDPI/) deploys to GitHub Pages on every push to `main`. Its source is in `website/`; `python3 scripts/build_site.py` builds the static site in `build-site/` using the version from CMake.
 
 ## Compatibility
 

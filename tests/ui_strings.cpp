@@ -13,6 +13,7 @@ int main() {
     const char* vpnMessage = "Обнаружен включённый сторонний VPN. Выключите его перед запуском VPN или теста стратегий и повторите попытку.";
     if (L(vpnMessage) != wxString::FromUTF8(vpnMessage)) return 7;
     SetEnglish(true, false);
+    if (L("Вести логи") != "Enable logging") return 10;
     if (L("Включить") != "Turn on" || L("Полная версия") != "Full version") return 4;
     if (L("Сторонний VPN включён") != "Another VPN is active" ||
         L(vpnMessage) != "Another VPN is active. Turn it off before starting the VPN or strategy tests, then try again.") return 8;

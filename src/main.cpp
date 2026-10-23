@@ -129,6 +129,7 @@ class MainFrame : public wxFrame {
     void LanguageChanged() {
         TranslateWindow(this);
         language_->SetSelection(English() ? 1 : 0);
+        logging_->SetToolTip(L("Менять настройку можно при отключённом соединении. Логи помогают при диагностике."));
         const char* names[] = {"Свои параметры", "Разделение TCP", "Разделение TLS", "Без обхода (диагностика)"};
         for (unsigned i = 0; i < 4; ++i) profile_->SetString(i, L(names[i]));
         networkMode_->SetString(0, L("Системный прокси"));
@@ -138,7 +139,7 @@ class MainFrame : public wxFrame {
     }
     wxStaticText *status_, *address_;
     wxButton *toggle_, *import_;
-    wxCheckBox* automatic_;
+    wxCheckBox *automatic_, *logging_;
     wxButton* restore_;
     wxButton* test_;
     std::unique_ptr<ProxyBackend> proxyBackend_;
@@ -162,6 +163,7 @@ class MainFrame : public wxFrame {
     VpnPhysicalNetwork vpnPhysical_{"", 0};
 
     void Log(const wxString& text) {
+        if (!DiagnosticLogging()) return;
         if (log_) {
             if (log_->GetLastPosition() > 180000) log_->Remove(0, 60000);
             log_->AppendText(text);
@@ -172,9 +174,12 @@ class MainFrame : public wxFrame {
         if (file.IsOpened()) file.Write(bytes.data(), bytes.length());
     }
     void Event(const wxString& text) {
+        if (!DiagnosticLogging()) return;
         Log("[" + wxDateTime::Now().FormatISOCombined(' ') + "] " + text + "\n");
     }
     void InitializeLog() {
+        logPath_.clear();
+        if (!DiagnosticLogging()) return;
 #ifdef __APPLE__
         wxString directory = DiagnosticDirectory(wxStandardPaths::Get().GetUserDataDir());
         wxFileName::Mkdir(directory, 0700, wxPATH_MKDIR_FULL);
@@ -203,9 +208,11 @@ class MainFrame : public wxFrame {
         config_.Write("automatic_proxy", automatic_->GetValue());
         config_.Write("vpn_mode", VpnAvailable() && networkMode_->GetSelection() == 1);
         config_.Write("vpn_dns", DnsServer());
+        config_.Write("logging_enabled", DiagnosticLogging());
         config_.Flush();
     }
     void Editable(bool enable) {
+        logging_->Enable(enable);
         arguments_->Enable(enable); port_->Enable(enable);
         profile_->Enable(enable); import_->Enable(enable);
         automatic_->Enable(enable);
@@ -235,18 +242,17 @@ class MainFrame : public wxFrame {
         if (!child) return;
         wxInputStream* stream = errors ? child->GetErrorStream() : child->GetInputStream();
         if (!stream) return;
-        std::string bytes;
-        bytes.reserve(4096);
-        for (size_t count = 0; count < 65536 &&
-            (errors ? child->IsErrorAvailable() : child->IsInputAvailable()); ++count) {
-            char byte = static_cast<char>(stream->GetC());
-            if (stream->LastRead() != 1) break;
-            bytes.push_back(byte);
+        char bytes[4096];
+        for (int block = 0; block < 16 &&
+            (errors ? child->IsErrorAvailable() : child->IsInputAvailable()); ++block) {
+            stream->Read(bytes, sizeof(bytes));
+            const size_t size = stream->LastRead();
+            if (!size) break;
+            if (!DiagnosticLogging()) continue;
+            wxString text = wxString::FromUTF8(bytes, size);
+            if (text.empty()) text = wxString::From8BitData(bytes, size);
+            Log(text);
         }
-        if (bytes.empty()) return;
-        wxString text = wxString::FromUTF8(bytes.data(), bytes.size());
-        if (text.empty()) text = wxString::From8BitData(bytes.data(), bytes.size());
-        Log(text);
     }
     void Drain(wxProcess* child) {
         DrainAvailable(child, false);
@@ -268,7 +274,7 @@ class MainFrame : public wxFrame {
         std::vector<wxString> args{executable.GetFullPath(), "--device",
             "tun://HelloAndByeDPI?guid={A18F60A0-0D7B-4A41-925E-BA2DAB87C847}",
             "--proxy", wxString::Format("socks5://127.0.0.1:%d", port_->GetValue()),
-            "--mtu", "1500", "--loglevel", DiagnosticLogging() ? "debug" : "warning"};
+            "--mtu", "1500", "--loglevel", DiagnosticLogging() ? "debug" : "silent"};
         std::vector<const wchar_t*> argv; for (const auto& arg : args) argv.push_back(arg.wc_str()); argv.push_back(nullptr);
         wxString command; for (const auto& arg : args) command += wxString(command.empty() ? "" : " ") + "\"" + arg + "\"";
         Event("tun2socks command: " + command);
@@ -554,7 +560,10 @@ class MainFrame : public wxFrame {
 public:
     void OpenPolicyTests(bool vpn) {
         if (!RestoreProxy()) return;
+        const bool loggedBefore = DiagnosticLogging();
         auto choice = ShowPolicyTests(this, vpn, DnsServer()); LanguageChanged();
+        logging_->SetValue(DiagnosticLogging());
+        if (loggedBefore != DiagnosticLogging()) InitializeLog();
         if (choice.selected) {
             networkMode_->SetSelection(choice.vpn ? 1 : 0);
             dns_->Clear(); int selected = FillDnsChoice(dns_, choice.dns);
@@ -571,8 +580,10 @@ public:
     void RunUISmoke() {
         CallAfter([this] {
             bool valid = !full_ && toggle_->IsShown() && favorites_->IsShown() && !arguments_->IsShown() && !log_->IsShown();
+            valid = valid && logging_->IsShown() && !logging_->GetValue() && !DiagnosticLogging() && logPath_.empty();
             SetEnglish(true, false); LanguageChanged();
             valid = valid && toggle_->GetLabel() == "Turn on" && mode_->GetLabel() == "Full version" &&
+                logging_->GetLabel() == "Enable logging" &&
                 networkMode_->GetString(0) == "System proxy" &&
                 ((!VpnAvailable() && networkMode_->GetCount() == 1) ||
                  (VpnAvailable() && networkMode_->GetCount() == 2 &&
@@ -598,6 +609,7 @@ public:
     }
     void RunSmoke() {
         closing_ = true;
+        networkMode_->SetSelection(0);
         automatic_->SetValue(systemProxySmoke); // Regular smoke tests never change the network.
         port_->SetValue(19581);
         arguments_->SetValue("--split 1");
@@ -607,6 +619,7 @@ public:
         });
     }
     MainFrame() : wxFrame(nullptr, wxID_ANY, BYEDPI_APP_CAPTION, wxDefaultPosition, wxSize(700, 650)), timer_(this) {
+        SetDiagnosticLogging(DiagnosticLogging() || (!smokeTest && config_.ReadBool("logging_enabled", false)));
         SetMinSize(wxSize(560, 580));
 #ifdef __WXMSW__
         SetIcon(wxIcon("IDI_APP_ICON", wxBITMAP_TYPE_ICO_RESOURCE));
@@ -702,6 +715,13 @@ public:
         root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 18); advanced_.push_back(root->GetItem(root->GetItemCount() - 1));
         test_ = new wxButton(panel, wxID_ANY, L("Тест стратегий"));
         root->Add(test_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 18);
+        logging_ = new wxCheckBox(panel, wxID_ANY, L("Вести логи"));
+        logging_->SetValue(DiagnosticLogging());
+        logging_->SetToolTip(L("Менять настройку можно при отключённом соединении. Логи помогают при диагностике."));
+        root->Add(logging_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 18);
+        logging_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+            SetDiagnosticLogging(logging_->GetValue()); InitializeLog(); Save();
+        });
         root->Add(restore_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 18);
         auto hint = new wxStaticText(panel, wxID_ANY,
             L("Нажмите «Включить» — браузеры с системными настройками используют прокси.\nПри отключении прежние настройки сети восстанавливаются.\nПриложения со своими настройками прокси могут игнорировать системные."));

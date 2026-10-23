@@ -211,7 +211,8 @@ wxString VpnMacTunnelScript(const wxString& tun2socks, const wxString& deviceNam
     const wxString& dnsServer) {
     ValidateInterface(deviceName); ValidateInterface(physicalInterface);
     const std::string tun = ShellQuote(tun2socks), device = ShellQuote(deviceName);
-    const std::string stop = ShellQuote(stopFile), status = ShellQuote(statusFile), log = ShellQuote(logFile);
+    const std::string stop = ShellQuote(stopFile), status = ShellQuote(statusFile);
+    const std::string log = DiagnosticLogging() ? ShellQuote(logFile) : "/dev/null";
     std::string dnsSetup, dnsCleanup;
     if (!dnsServer.empty()) {
         in_addr parsed = {};
@@ -254,7 +255,7 @@ wxString VpnMacTunnelScript(const wxString& tun2socks, const wxString& deviceNam
         "child=''; dns_changed=0; physical_route_added=0; trap " + ShellQuote(wxString::FromUTF8(cleanup)) + " EXIT TERM INT; " + routeSetup + dnsSetup +
         tun + " --device " + device + " --proxy " + ShellQuote(proxy) + " --interface " +
         ShellQuote(physicalInterface) + " --mtu 1500 --loglevel " +
-        (DiagnosticLogging() ? "debug" : "warning") + " >> " + log + " 2>&1 & child=$!; "
+        (DiagnosticLogging() ? "debug" : "silent") + " >> " + log + " 2>&1 & child=$!; "
         "i=0; while [ $i -lt 100 ] && ! /sbin/ifconfig " + device + " >/dev/null 2>&1; do "
         "kill -0 $child 2>/dev/null || exit 1; i=$((i+1)); sleep 0.1; done; "
         "kill -0 $child 2>/dev/null || exit 1; "

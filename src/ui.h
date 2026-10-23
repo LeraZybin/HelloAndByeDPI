@@ -16,6 +16,8 @@ inline void SetEnglish(bool value, bool save = true) { English() = value; if (sa
 // active Windows code page (which turns Russian text into "Рџ...").
 inline wxString L(const char* text) {
     static const char* dictionary[][2] = {
+    {"Вести логи", "Enable logging"},
+    {"Менять настройку можно при отключённом соединении. Логи помогают при диагностике.", "Change this setting while disconnected. Logs help with troubleshooting."},
     {"Сторонний VPN включён", "Another VPN is active"},
     {"Обнаружен включённый сторонний VPN. Выключите его перед запуском VPN или теста стратегий и повторите попытку.", "Another VPN is active. Turn it off before starting the VPN or strategy tests, then try again."},
     {"Проверка подключения", "Connection check"},

@@ -74,6 +74,7 @@ class Tester : public wxDialog {
     wxGauge* gauge_;
     wxChoice *language_, *dns_, *networkMode_;
     wxButton* mode_;
+    wxCheckBox* logging_;
     wxBoxSizer* root_;
     wxSizerItem *customSitesItem_ = nullptr, *customPolicyItem_ = nullptr;
     wxSizerItem* dnsRowItem_ = nullptr;
@@ -154,7 +155,7 @@ class Tester : public wxDialog {
     int tunnelTicks_ = 0;
     wxString testLog_;
     void TestLog(const wxString& message) {
-        if (testLog_.empty()) return;
+        if (!DiagnosticLogging() || testLog_.empty()) return;
         wxFile file(testLog_, wxFile::write_append);
         wxString line = "[" + wxDateTime::Now().FormatISOCombined(' ') + "] " + message + "\n";
         auto bytes = line.utf8_str();
@@ -170,7 +171,7 @@ class Tester : public wxDialog {
         const wxString prefix = wxString::Format("/tmp/org.helloandbyedpi.test.%lu", static_cast<unsigned long>(wxGetProcessId()));
         stopFile_ = prefix + ".stop"; statusFile_ = prefix + ".status";
         wxString dir = DiagnosticDirectory(wxStandardPaths::Get().GetUserDataDir());
-        wxFileName::Mkdir(dir, 0700, wxPATH_MKDIR_FULL);
+        if (DiagnosticLogging()) wxFileName::Mkdir(dir, 0700, wxPATH_MKDIR_FULL);
         tunnelLog_ = dir + "/policy-vpn.log";
         wxString binary = ApplicationRoot() + "/lib/tun2socks";
         if (!wxFileName(binary).IsFileExecutable()) throw std::runtime_error("Missing lib/tun2socks.");
@@ -187,7 +188,7 @@ class Tester : public wxDialog {
         wxString binary = ApplicationRoot() + "/lib/tun2socks.exe";
         if (!wxFileExists(binary)) throw std::runtime_error("Missing lib/tun2socks.exe.");
         std::vector<wxString> args{binary, "--device", "tun://HelloAndByeDPI?guid={A18F60A0-0D7B-4A41-925E-BA2DAB87C847}",
-            "--proxy", wxString::Format("socks5://127.0.0.1:%d", port_), "--mtu", "1500", "--loglevel", DiagnosticLogging() ? "debug" : "warning"};
+            "--proxy", wxString::Format("socks5://127.0.0.1:%d", port_), "--mtu", "1500", "--loglevel", DiagnosticLogging() ? "debug" : "silent"};
         std::vector<const wchar_t*> argv; for (auto& arg : args) argv.push_back(arg.wc_str()); argv.push_back(nullptr);
         tunnelProcess_ = new wxProcess(this);
         tunnelPid_ = wxExecute(argv.data(), wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE, tunnelProcess_);
@@ -268,6 +269,7 @@ class Tester : public wxDialog {
         }
     }
     void Controls(bool idle) {
+        logging_->Enable(idle);
         networkMode_->Enable(idle);
         policiesBox_->Enable(idle); groupsBox_->Enable(idle); custom_->Enable(idle);
         timeout_->Enable(idle); attempts_->Enable(idle); parallel_->Enable(idle); sni_->Enable(idle);
@@ -385,11 +387,14 @@ class Tester : public wxDialog {
     }
     void Begin() {
         try {
-            wxString dir = DiagnosticDirectory(wxStandardPaths::Get().GetUserDataDir());
-            wxFileName::Mkdir(dir, 0700, wxPATH_MKDIR_FULL);
-            testLog_ = dir + "/policy-test.log";
-            if (wxFileExists(testLog_) && wxFileName(testLog_).GetSize() > 2 * 1024 * 1024)
-                wxRenameFile(testLog_, testLog_ + ".old", true);
+            testLog_.clear();
+            if (DiagnosticLogging()) {
+                wxString dir = DiagnosticDirectory(wxStandardPaths::Get().GetUserDataDir());
+                wxFileName::Mkdir(dir, 0700, wxPATH_MKDIR_FULL);
+                testLog_ = dir + "/policy-test.log";
+                if (wxFileExists(testLog_) && wxFileName(testLog_).GetSize() > 2 * 1024 * 1024)
+                    wxRenameFile(testLog_, testLog_ + ".old", true);
+            }
             vpn_ = networkMode_->GetSelection() == 1;
             TestLog(vpn_ ? "=== VPN policy test ===" : "=== SOCKS5 policy test ===");
             TestLog("Probe runtime: " + W(ProbeRuntime()));
@@ -518,6 +523,7 @@ class Tester : public wxDialog {
         char data[4096];
         for (int i = 0; i < 8 && stream->CanRead(); ++i) {
             stream->Read(data, sizeof(data)); size_t n = stream->LastRead(); if (!n) break;
+            if (!DiagnosticLogging()) continue;
             auto& log = runs_[current_].diagnostic;
             wxString message = wxString::FromUTF8(data, n);
             if (DiagnosticLogging() || log.size() < 16000) TestLog(message);
@@ -577,7 +583,7 @@ class Tester : public wxDialog {
                     throw std::runtime_error("VPN adapter disappeared.");
                 auto completed = batch_->Poll();
                 auto& run = runs_[current_]; run.results.insert(run.results.end(), completed.begin(), completed.end());
-                for (const auto& result : completed)
+                if (DiagnosticLogging()) for (const auto& result : completed)
                     TestLog(run.name + " " + W(result.url) + wxString::Format(" HTTP=%ld available=%d transport=%d sampleLimited=%d DNS=%.1fms connect=%.1fms TLS=%.1fms total=%.1fms ",
                         result.http, result.available, result.transportCode, result.sampleLimited, result.dnsMilliseconds,
                         result.connectMilliseconds, result.tlsMilliseconds, result.milliseconds) +
@@ -669,6 +675,13 @@ public:
         language_->SetSelection(English() ? 1 : 0); header->Add(language_, 0, wxRIGHT, 8);
         mode_ = new wxButton(this, wxID_ANY, L("Полная версия")); header->Add(mode_);
         root->Add(header, 0, wxEXPAND | wxALL, 18);
+        logging_ = new wxCheckBox(this, wxID_ANY, L("Вести логи"));
+        logging_->SetValue(DiagnosticLogging());
+        root->Add(logging_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
+        logging_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+            SetDiagnosticLogging(logging_->GetValue());
+            if (!smoke_) { wxConfig app("ByeDPI Desktop"); app.Write("logging_enabled", DiagnosticLogging()); app.Flush(); }
+        });
         auto networkRow = new wxBoxSizer(wxHORIZONTAL);
         networkRow->Add(new wxStaticText(this, wxID_ANY, L("Режим подключения")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
         networkMode_ = new wxChoice(this, wxID_ANY);

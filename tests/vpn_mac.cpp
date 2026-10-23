@@ -1,4 +1,5 @@
 #include "vpn.h"
+#include "diagnostic_mode.h"
 #include <iostream>
 #include <wx/filename.h>
 #include <wx/ffile.h>
@@ -67,6 +68,7 @@ int main(int argc, char** argv) {
         for (const char* dns : {"", "1.1.1.1"}) {
             auto script = VpnMacTunnelScript("/tmp/test ' tunnel", "utun249", "socks5://127.0.0.1:19583",
                 physical.interfaceName, getpid(), "/tmp/test ' stop", "/tmp/test ' status", "/tmp/test ' log", dns);
+            if (!DiagnosticLogging() && (!script.Contains("--loglevel silent") || !script.Contains(") >> /dev/null"))) return 8;
             wxString path = wxFileName::CreateTempFileName("byedpi-vpn-shell-");
             { wxFFile file(path, "wb"); auto bytes = script.utf8_str(); if (!file.Write(bytes.data(), bytes.length())) return 4; }
             pid_t child = fork();
@@ -75,6 +77,11 @@ int main(int argc, char** argv) {
             wxRemoveFile(path);
             if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 6;
         }
+        SetDiagnosticLogging(true);
+        auto logged = VpnMacTunnelScript("/tmp/tun", "utun249", "socks5://127.0.0.1:19583",
+            physical.interfaceName, getpid(), "/tmp/stop", "/tmp/status", "/tmp/enabled.log");
+        if (!logged.Contains("--loglevel debug") || !logged.Contains("'/tmp/enabled.log'")) return 9;
+        SetDiagnosticLogging(false);
         for (const char* mode : {"new", "existing", "fail", "lost"})
             if (!CheckRouteLifecycle(physical.interfaceName, mode)) return 7;
         std::cout << physical.interfaceName.ToStdString() << " " << physical.address.ToStdString() << "\n";
