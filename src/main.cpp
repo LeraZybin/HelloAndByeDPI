@@ -250,7 +250,7 @@ class MainFrame : public wxFrame {
         std::vector<wxString> args{executable.GetFullPath(), "--device",
             "tun://HelloAndByeDPI?guid={A18F60A0-0D7B-4A41-925E-BA2DAB87C847}",
             "--proxy", wxString::Format("socks5://127.0.0.1:%d", port_->GetValue()),
-            "--mtu", "1500", "--loglevel", "warn"};
+            "--mtu", "1500", "--loglevel", "warning"};
         std::vector<const wchar_t*> argv; for (const auto& arg : args) argv.push_back(arg.wc_str()); argv.push_back(nullptr);
         wxString command; for (const auto& arg : args) command += wxString(command.empty() ? "" : " ") + "\"" + arg + "\"";
         Event("tun2socks command: " + command);
