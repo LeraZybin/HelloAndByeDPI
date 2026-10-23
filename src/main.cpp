@@ -28,6 +28,11 @@
 #ifndef BYEDPI_APP_VERSION
 #define BYEDPI_APP_VERSION "development"
 #endif
+#ifdef BYEDPI_TEST_BUILD
+#define BYEDPI_APP_CAPTION "HelloAndByeDPI " BYEDPI_APP_VERSION " · test build"
+#else
+#define BYEDPI_APP_CAPTION "HelloAndByeDPI " BYEDPI_APP_VERSION
+#endif
 
 static bool smokeTest = false;
 static bool systemProxySmoke = false;
@@ -174,7 +179,7 @@ class MainFrame : public wxFrame {
 #endif
         if (wxFileExists(logPath_) && wxFileName(logPath_).GetSize() > 2 * 1024 * 1024)
             wxRenameFile(logPath_, logPath_ + ".old", true);
-        Event("=== HelloAndByeDPI " BYEDPI_APP_VERSION " session ===");
+        Event("=== " BYEDPI_APP_CAPTION " session ===");
         Event("OS: " + wxGetOsDescription() + wxString::Format("; process architecture: %zu-bit; PID: %lu", sizeof(void*) * 8, static_cast<unsigned long>(wxGetProcessId())));
         Event("Executable: " + wxStandardPaths::Get().GetExecutablePath());
         Event("Log file: " + logPath_);
@@ -566,7 +571,7 @@ public:
             if (!pid_) Destroy();
         });
     }
-    MainFrame() : wxFrame(nullptr, wxID_ANY, "HelloAndByeDPI " BYEDPI_APP_VERSION, wxDefaultPosition, wxSize(700, 650)), timer_(this) {
+    MainFrame() : wxFrame(nullptr, wxID_ANY, BYEDPI_APP_CAPTION, wxDefaultPosition, wxSize(700, 650)), timer_(this) {
         SetMinSize(wxSize(560, 580));
 #ifdef __WXMSW__
         SetIcon(wxIcon("IDI_APP_ICON", wxBITMAP_TYPE_ICO_RESOURCE));
@@ -584,7 +589,7 @@ public:
         language_->SetSelection(English() ? 1 : 0); header->Add(language_, 0, wxRIGHT, 8);
         mode_ = new wxButton(panel, wxID_ANY, L("Полная версия")); header->Add(mode_);
         root->Add(header, 0, wxEXPAND | wxALL, 18);
-        auto title = new wxStaticText(panel, wxID_ANY, "HelloAndByeDPI " BYEDPI_APP_VERSION);
+        auto title = new wxStaticText(panel, wxID_ANY, BYEDPI_APP_CAPTION);
         title->SetFont(title->GetFont().Larger().Larger().Bold());
         root->Add(title, 0, wxLEFT | wxRIGHT | wxBOTTOM, 18);
         toggle_ = new wxButton(panel, wxID_ANY, L("Включить"), wxDefaultPosition, wxSize(-1, 76));

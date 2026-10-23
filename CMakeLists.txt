@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ByeDPI_Desktop VERSION 0.6.4 LANGUAGES C CXX)
+project(ByeDPI_Desktop VERSION 0.6.3 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)
@@ -79,7 +79,7 @@ add_test(NAME http_probe_model COMMAND http_probe_tests "${CMAKE_SOURCE_DIR}/dat
 add_executable(probe_integration tests/probe_integration.cpp)
 target_link_libraries(probe_integration PRIVATE http_probe)
 add_executable(ByeDPI WIN32 MACOSX_BUNDLE src/main.cpp src/proxy_journal.cpp src/policy_test.cpp)
-target_compile_definitions(ByeDPI PRIVATE BYEDPI_APP_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(ByeDPI PRIVATE BYEDPI_APP_VERSION="${PROJECT_VERSION}" BYEDPI_TEST_BUILD=1)
 if(WIN32)
   configure_file(src/app.rc.in ${CMAKE_CURRENT_BINARY_DIR}/app.rc @ONLY)
   target_sources(ByeDPI PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/app.rc src/system_proxy_win.cpp src/vpn_win.cpp)
@@ -128,8 +128,8 @@ set_target_properties(ByeDPI PROPERTIES
   OUTPUT_NAME "HelloAndByeDPI"
   MACOSX_BUNDLE_ICON_FILE "icon.icns"
   MACOSX_BUNDLE_BUNDLE_NAME "HelloAndByeDPI"
-  MACOSX_BUNDLE_BUNDLE_VERSION "0.6.4"
-  MACOSX_BUNDLE_SHORT_VERSION_STRING "0.6.4")
+  MACOSX_BUNDLE_BUNDLE_VERSION "0.6.3"
+  MACOSX_BUNDLE_SHORT_VERSION_STRING "0.6.3")
 add_dependencies(ByeDPI ciadpi)
 add_custom_command(TARGET ByeDPI POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ciadpi> $<TARGET_FILE_DIR:ByeDPI>
