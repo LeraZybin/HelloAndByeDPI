@@ -1,4 +1,4 @@
-#include "vpn_win.h"
+#include "vpn.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -103,7 +103,7 @@ VpnPhysicalNetwork VpnFindPhysicalNetwork() {
     throw std::runtime_error("Physical interface has no IPv4 address.");
 }
 
-bool VpnAdapterReady() {
+bool VpnAdapterReady(const wxString&) {
     ULONG size = 16384;
     std::vector<unsigned char> storage(size);
     auto adapters = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(storage.data());
@@ -118,7 +118,7 @@ bool VpnAdapterReady() {
     return false;
 }
 
-wxString VpnConfigure(const wxString& dnsServer) {
+wxString VpnConfigure(const wxString&, const wxString& dnsServer) {
     wxString log;
     log += Run(Netsh({L"interface", L"ipv4", L"set", L"address", L"name=HelloAndByeDPI",
         L"source=static", L"address=198.18.0.1", L"mask=255.255.255.0", L"gateway=none"}), true) + "\n";
@@ -132,7 +132,7 @@ wxString VpnConfigure(const wxString& dnsServer) {
     return log;
 }
 
-wxString VpnCleanup() {
+wxString VpnCleanup(const wxString&) {
     wxString log;
     log += Run(Netsh({L"interface", L"ipv4", L"delete", L"route", L"prefix=0.0.0.0/1",
         L"interface=HelloAndByeDPI", L"store=active"}), false) + "\n";

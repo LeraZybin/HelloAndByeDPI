@@ -8,7 +8,6 @@ import zipfile
 
 parser = argparse.ArgumentParser()
 parser.add_argument('build', type=Path)
-parser.add_argument('arch', choices=['x86', 'x64'])
 parser.add_argument('--archive', type=Path, default=Path('third_party/windows-sdk-10.0.19041.5.nupkg'))
 args = parser.parse_args()
 url = 'https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.cpp/10.0.19041.5/microsoft.windows.sdk.cpp.10.0.19041.5.nupkg'
@@ -20,7 +19,7 @@ if hashlib.sha256(args.archive.read_bytes()).hexdigest() != sha256:
     raise SystemExit('Windows SDK SHA-256 mismatch')
 args.build.mkdir(parents=True, exist_ok=True)
 with zipfile.ZipFile(args.archive) as sdk:
-    prefix = f'c/Redist/10.0.19041.0/ucrt/DLLs/{args.arch}/'
+    prefix = 'c/Redist/10.0.19041.0/ucrt/DLLs/x64/'
     names = [n for n in sdk.namelist() if n.startswith(prefix) and n.endswith('.dll')]
     if not any(n.endswith('/ucrtbase.dll') for n in names):
         raise SystemExit('Missing UCRT redistributable')
@@ -36,4 +35,4 @@ if not license_file.exists():
     f'Source: {url}\nSHA-256: {sha256}\n'
     'License: https://aka.ms/WinSDKLicenseURL\n'
     'Deployment: https://learn.microsoft.com/en-us/cpp/windows/universal-crt-deployment\n')
-print(f'{args.arch}: copied {len(names)} official UCRT redistributable DLLs')
+print(f'x64: copied {len(names)} official UCRT redistributable DLLs')

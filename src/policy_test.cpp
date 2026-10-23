@@ -346,6 +346,10 @@ class Tester : public wxDialog {
         if (!engine.IsFileExecutable()) throw std::runtime_error(U(L("Не найден ciadpi рядом с приложением.")));
         auto parsed = Arguments(runs_[current_].arguments);
         std::vector<wxString> args{engine.GetFullPath(), "--ip", "127.0.0.1", "--port", wxString::Format("%d", port_)};
+#ifdef __WXMSW__
+        args.push_back("--debug"); args.push_back("0");
+        args.push_back("--wait-send");
+#endif
         for (auto& argument : parsed) args.push_back(W(argument));
         std::vector<const wchar_t*> argv; for (auto& argument : args) argv.push_back(argument.wc_str()); argv.push_back(nullptr);
         process_ = new wxProcess(this); process_->Redirect();

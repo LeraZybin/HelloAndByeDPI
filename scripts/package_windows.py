@@ -6,15 +6,13 @@ import sys
 import zipfile
 
 build, destination = map(Path, sys.argv[1:3])
-architecture = sys.argv[3].lower() if len(sys.argv) > 3 else ('x64' if 'x64' in destination.name.lower() else 'x86')
-if architecture not in ('x64', 'x86'):
-    raise SystemExit('Architecture must be x64 or x86')
+if len(sys.argv) > 3 and sys.argv[3].lower() != 'x64':
+    raise SystemExit('HelloAndByeDPI supports only 64-bit Windows')
 launcher = build / 'HelloAndByeDPI-launcher.exe'
 application = build / 'HelloAndByeDPI.exe'
 root_files = [build / 'ciadpi.exe']
 lib_files = [application] + list(build.glob('*.dll'))
-if architecture == 'x64':
-    lib_files.append(build / 'tun2socks.exe')
+lib_files.append(build / 'tun2socks.exe')
 for required in (launcher, *root_files, *lib_files):
     if not required.is_file():
         raise SystemExit(f'Missing required file: {required}')
@@ -25,10 +23,8 @@ for directory in ('data', 'licenses'):
 vpn_text = '''Режим VPN направляет IPv4-трафик всех приложений через ByeDPI. При первом
 запуске Windows запросит права администратора и установит подписанный драйвер
 Wintun. Настройка адаптера выполняется в фоне, окно остаётся доступным.
-''' if architecture == 'x64' else '''VPN-режим доступен в 64-битной сборке. Эта 32-битная версия предоставляет
-системный HTTP/HTTPS-прокси и ручной SOCKS5.
 '''
-readme = f'''HelloAndByeDPI 0.6.1 — Windows {architecture}
+readme = f'''HelloAndByeDPI 0.6.2 — Windows x64
 
 Распакуйте весь архив в одну папку и запустите HelloAndByeDPI.exe.
 Не запускайте приложение прямо из ZIP. Каталоги lib, data и licenses,

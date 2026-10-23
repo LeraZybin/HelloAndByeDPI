@@ -67,6 +67,51 @@ def main():
         proxy.write_text(source.replace(original, replacement, 1))
     elif replacement not in source:
         raise RuntimeError("ByeDPI resolver patch no longer applies")
+    source = proxy.read_text()
+    include_anchor = "    #include <netdb.h>\n"
+    include_patch = """    #include <netdb.h>
+    #ifdef __APPLE__
+        #include <ifaddrs.h>
+        #include <net/if.h>
+    #endif
+"""
+    if include_patch not in source:
+        if include_anchor not in source:
+            raise RuntimeError("ByeDPI macOS interface include patch no longer applies")
+        source = source.replace(include_anchor, include_patch, 1)
+    bind_anchor = ("    if (bind(sfd, (struct sockaddr *)&params.baddr, \n"
+                   "            SA_SIZE(&params.baddr)) < 0) {\n")
+    bind_patch = """    #ifdef __APPLE__
+    // A full-tunnel utun route would otherwise capture ByeDPI's own remote
+    // sockets. Bind them to the physical interface selected by --conn-ip.
+    struct ifaddrs *interfaces = NULL;
+    if (params.baddr.sa.sa_family == AF_INET && getifaddrs(&interfaces) == 0) {
+        for (struct ifaddrs *item = interfaces; item; item = item->ifa_next) {
+            if (!item->ifa_addr || item->ifa_addr->sa_family != AF_INET)
+                continue;
+            struct sockaddr_in *candidate = (struct sockaddr_in *)item->ifa_addr;
+            if (candidate->sin_addr.s_addr != params.baddr.in.sin_addr.s_addr)
+                continue;
+            unsigned int index = if_nametoindex(item->ifa_name);
+            if (index && setsockopt(sfd, IPPROTO_IP, IP_BOUND_IF, &index, sizeof(index)) < 0) {
+                uniperror("setsockopt IP_BOUND_IF");
+                freeifaddrs(interfaces);
+                close(sfd);
+                return -1;
+            }
+            break;
+        }
+        freeifaddrs(interfaces);
+    }
+    #endif
+    if (bind(sfd, (struct sockaddr *)&params.baddr,
+            SA_SIZE(&params.baddr)) < 0) {
+"""
+    if bind_patch not in source:
+        if bind_anchor not in source:
+            raise RuntimeError("ByeDPI macOS interface binding patch no longer applies")
+        source = source.replace(bind_anchor, bind_patch, 1)
+    proxy.write_text(source)
     print("Dependencies ready.")
 
 if __name__ == "__main__":

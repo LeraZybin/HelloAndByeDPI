@@ -18,8 +18,10 @@
 #include "policy_test.h"
 #include "ui.h"
 #include "app_paths.h"
+#if defined(__WXMSW__) || defined(__APPLE__)
+#include "vpn.h"
+#endif
 #ifdef __WXMSW__
-#include "vpn_win.h"
 #include <windows.h>
 #endif
 
@@ -29,7 +31,7 @@ static bool startVpnElevated = false;
 static int smokeResult = 1;
 
 static bool VpnAvailable() {
-#if defined(__WXMSW__) && defined(_WIN64)
+#if (defined(__WXMSW__) && defined(_WIN64)) || defined(__APPLE__)
     return true;
 #else
     return false;
@@ -135,6 +137,9 @@ class MainFrame : public wxFrame {
     std::future<wxString> vpnFuture_;
     wxConfig config_{"ByeDPI Desktop"};
     wxString logPath_;
+    wxString vpnDevice_;
+    wxString vpnStopFile_, vpnStatusFile_;
+    VpnPhysicalNetwork vpnPhysical_{"", 0};
 
     void Log(const wxString& text) {
         if (log_) {
@@ -159,7 +164,7 @@ class MainFrame : public wxFrame {
             wxFileName::Mkdir(directory, 0700, wxPATH_MKDIR_FULL);
             logPath_ = directory + "/HelloAndByeDPI.log";
         } else test.Close();
-        Event("=== HelloAndByeDPI 0.6.1 session ===");
+        Event("=== HelloAndByeDPI 0.6.2 session ===");
         Event("OS: " + wxGetOsDescription() + wxString::Format("; process architecture: %zu-bit; PID: %lu", sizeof(void*) * 8, static_cast<unsigned long>(wxGetProcessId())));
         Event("Executable: " + wxStandardPaths::Get().GetExecutablePath());
         Event("Log file: " + logPath_);
@@ -246,6 +251,27 @@ class MainFrame : public wxFrame {
         toggle_->Disable();
         status_->SetLabel(L("Создание VPN-адаптера…"));
         Event(wxString::Format("tun2socks started; PID: %ld", tunPid_));
+#elif defined(__APPLE__)
+        wxFileName executable(ApplicationRoot() + "/lib/tun2socks");
+        if (!executable.IsFileExecutable())
+            throw std::runtime_error("Не найден исполняемый lib/tun2socks.");
+        vpnDevice_ = "utun233";
+        for (int unit = 233; unit < 250 && VpnAdapterReady(vpnDevice_); ++unit)
+            vpnDevice_ = wxString::Format("utun%d", unit + 1);
+        if (VpnAdapterReady(vpnDevice_)) throw std::runtime_error("Не найден свободный интерфейс utun.");
+        vpnStopFile_ = wxString::Format("/tmp/org.helloandbyedpi.%lu.stop", static_cast<unsigned long>(wxGetProcessId()));
+        vpnStatusFile_ = wxString::Format("/tmp/org.helloandbyedpi.%lu.status", static_cast<unsigned long>(wxGetProcessId()));
+        const wxString proxy = wxString::Format("socks5://127.0.0.1:%d", port_->GetValue());
+        const wxString device = vpnDevice_, tunnel = executable.GetFullPath(), physical = vpnPhysical_.interfaceName;
+        const wxString stop = vpnStopFile_, status = vpnStatusFile_, log = logPath_;
+        Event("Requesting macOS VPN authorization for " + device + " through " + physical);
+        vpnFuture_ = std::async(std::launch::async, [tunnel, device, proxy, physical, stop, status, log] {
+            return VpnStartMacTunnel(tunnel, device, proxy, physical,
+                static_cast<unsigned long>(wxGetProcessId()), stop, status, log);
+        });
+        vpnConfiguring_ = true; vpnStarting_ = false; vpnTicks_ = 0;
+        toggle_->Disable();
+        status_->SetLabel(L("Разрешите создание VPN в системном окне…"));
 #endif
     }
     void Start() {
@@ -294,14 +320,20 @@ class MainFrame : public wxFrame {
         // its reliably persisted HTTP/HTTPS proxy representation.
         std::vector<wxString> args = {engine.GetFullPath(),
             "--ip", "socks5://127.0.0.1", "--ip", "http://127.0.0.1",
-            "--port", wxString::Format("%d", port_->GetValue()), "--debug", "1"};
+            "--port", wxString::Format("%d", port_->GetValue()), "--debug", "0"};
 #ifdef __WXMSW__
+        // Windows has no TCP_INFO check for pending split segments here.
+        // Waiting makes disorder independent of debug-output timing and the
+        // TCP stack differences between Windows 8.1 and newer versions.
+        args.push_back("--wait-send");
+#endif
+#if defined(__WXMSW__) || defined(__APPLE__)
         if (vpnActive_) {
             try {
-                auto physical = VpnFindPhysicalNetwork();
-                args.push_back("--conn-ip"); args.push_back(physical.address);
-                Event("Physical IPv4 selected for ByeDPI outbound connections: " + physical.address +
-                    wxString::Format(" (interface index %lu)", physical.interfaceIndex));
+                vpnPhysical_ = VpnFindPhysicalNetwork();
+                args.push_back("--conn-ip"); args.push_back(vpnPhysical_.address);
+                Event("Physical IPv4 selected for ByeDPI outbound connections: " + vpnPhysical_.address +
+                    " (" + vpnPhysical_.interfaceName + wxString::Format(", interface index %lu)", vpnPhysical_.interfaceIndex));
             } catch (const std::exception& error) {
                 Event("Physical network detection failed: " + wxString::FromUTF8(error.what()));
                 wxMessageBox(wxString::FromUTF8(error.what()), L("Не удалось запустить"), wxOK | wxICON_ERROR, this); return;
@@ -344,9 +376,10 @@ class MainFrame : public wxFrame {
         Event(wxString::Format("Stopping engine PID %ld", pid_));
         status_->SetLabel(L("Остановка…")); toggle_->Disable();
         if (vpnActive_) {
-#ifdef __WXMSW__
-            Event("Removing VPN routes: " + VpnCleanup());
+#ifdef __APPLE__
+            VpnStopMacTunnel(vpnStopFile_);
 #endif
+            Event("Removing VPN routes: " + VpnCleanup(vpnDevice_));
             vpnConfigured_ = false; vpnStarting_ = false; vpnConfiguring_ = false;
         }
         if (tunPid_) Event(wxString::Format("tun2socks SIGTERM result: %d", static_cast<int>(wxProcess::Kill(tunPid_, wxSIGTERM))));
@@ -364,15 +397,20 @@ class MainFrame : public wxFrame {
                 if (tunPid_) wxProcess::Kill(tunPid_, wxSIGKILL); if (pid_) wxProcess::Kill(pid_, wxSIGKILL); ticks_ = 20;
             }
         } else if (vpnConfiguring_) {
-#ifdef __WXMSW__
+#if defined(__WXMSW__) || defined(__APPLE__)
             if (vpnFuture_.valid() && vpnFuture_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 vpnConfiguring_ = false;
                 try {
                     Event("VPN configuration completed: " + vpnFuture_.get());
+#ifdef __APPLE__
+                    vpnStarting_ = true; vpnTicks_ = 0;
+                    status_->SetLabel(L("Создание VPN-адаптера…"));
+#else
                     vpnConfigured_ = true;
                     status_->SetLabel(L("VPN подключён — весь IPv4-трафик направлен через ByeDPI"));
                     Event("VPN routes are active");
                     if (closing_) Stop(); else toggle_->Enable();
+#endif
                 } catch (const std::exception& error) {
                     Event("VPN configuration failed: " + wxString::FromUTF8(error.what()));
                     wxMessageBox(wxString::FromUTF8(error.what()), L("Не удалось запустить"), wxOK | wxICON_ERROR, this);
@@ -381,18 +419,30 @@ class MainFrame : public wxFrame {
             }
 #endif
         } else if (vpnStarting_) {
-#ifdef __WXMSW__
+#if defined(__WXMSW__) || defined(__APPLE__)
             ++vpnTicks_;
-            if (VpnAdapterReady()) {
+#ifdef __APPLE__
+            if (VpnAdapterReady(vpnDevice_) && VpnMacTunnelReady(vpnStatusFile_)) {
+                vpnStarting_ = false; vpnConfigured_ = true;
+                status_->SetLabel(L("VPN подключён — весь IPv4-трафик направлен через ByeDPI"));
+                Event("macOS utun adapter and VPN routes are active");
+                if (closing_) Stop(); else toggle_->Enable();
+            } else if (vpnTicks_ >= 150) {
+                Event("macOS VPN adapter and routes did not become ready within 15 seconds"); Stop();
+            }
+#else
+            if (VpnAdapterReady(vpnDevice_)) {
                 vpnStarting_ = false; vpnConfiguring_ = true;
                 status_->SetLabel(L("Настройка VPN-адреса и маршрутов…"));
                 Event("VPN adapter appeared; configuring address, DNS and routes in background");
-                vpnFuture_ = std::async(std::launch::async, [] {
-                    wxString log = "Cleanup before configuration: " + VpnCleanup() + "\n";
-                    try { return log + VpnConfigure("1.1.1.1"); }
-                    catch (...) { VpnCleanup(); throw; }
+                wxString device = vpnDevice_;
+                vpnFuture_ = std::async(std::launch::async, [device] {
+                    wxString log = "Cleanup before configuration: " + VpnCleanup(device) + "\n";
+                    try { return log + VpnConfigure(device, "1.1.1.1"); }
+                    catch (...) { VpnCleanup(device); throw; }
                 });
             } else if (vpnTicks_ >= 100) { Event("VPN adapter did not appear within 10 seconds"); Stop(); }
+#endif
 #endif
         } else if (!ready_ && ticks_ % 3 == 0) {
             if (Listening()) {
@@ -445,9 +495,7 @@ class MainFrame : public wxFrame {
             delete tunProcess_; tunProcess_ = nullptr; tunPid_ = 0; vpnStarting_ = false; vpnConfigured_ = false;
             if (!stopping_) {
                 processFailed_ = true; stopping_ = true;
-#ifdef __WXMSW__
-                Event("Removing VPN routes after unexpected tun2socks exit: " + VpnCleanup());
-#endif
+                Event("Removing VPN routes after unexpected tun2socks exit: " + VpnCleanup(vpnDevice_));
                 if (pid_) wxProcess::Kill(pid_, wxSIGTERM);
             }
             FinishProcesses(); return;
@@ -461,11 +509,12 @@ class MainFrame : public wxFrame {
         delete process_; process_ = nullptr; pid_ = 0;
         if (tunPid_ && !stopping_) {
             stopping_ = true;
-#ifdef __WXMSW__
-            Event("Removing VPN routes after unexpected ByeDPI exit: " + VpnCleanup());
-#endif
+            Event("Removing VPN routes after unexpected ByeDPI exit: " + VpnCleanup(vpnDevice_));
             wxProcess::Kill(tunPid_, wxSIGTERM);
         }
+#ifdef __APPLE__
+        if (vpnActive_ && !stopping_) VpnStopMacTunnel(vpnStopFile_);
+#endif
         FinishProcesses();
     }
 public:
@@ -668,9 +717,7 @@ public:
             if ((pid_ || tunPid_) && event.CanVeto()) { event.Veto(); closing_ = true; Stop(); }
             else {
                 if (!RestoreProxy() && event.CanVeto()) { event.Veto(); return; }
-#ifdef __WXMSW__
-                if (vpnActive_) Event("Removing VPN routes during close: " + VpnCleanup());
-#endif
+                if (vpnActive_) Event("Removing VPN routes during close: " + VpnCleanup(vpnDevice_));
                 if (tunPid_) { wxProcess::Kill(tunPid_, wxSIGKILL); tunProcess_->Detach(); tunProcess_ = nullptr; }
                 if (pid_) { wxProcess::Kill(pid_, wxSIGKILL); process_->Detach(); process_ = nullptr; }
                 Destroy();

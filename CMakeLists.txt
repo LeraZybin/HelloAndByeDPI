@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(ByeDPI_Desktop VERSION 0.6.1 LANGUAGES C CXX)
+project(ByeDPI_Desktop VERSION 0.6.2 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)
 if(WIN32)
+  if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "HelloAndByeDPI supports only 64-bit Windows")
+  endif()
   enable_language(RC)
   add_compile_definitions(_WIN32_WINNT=0x0602 WINVER=0x0602)
 endif()
@@ -82,20 +85,12 @@ if(WIN32)
   target_link_libraries(ByeDPI PRIVATE wininet iphlpapi shell32)
   add_executable(ByeDPILauncher WIN32 src/launcher_win.c ${CMAKE_CURRENT_BINARY_DIR}/app.rc)
   set_target_properties(ByeDPILauncher PROPERTIES OUTPUT_NAME "HelloAndByeDPI-launcher")
-  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    set(BYEDPI_WX_SETUP_DIR "${wxWidgets_BINARY_DIR}/lib/gcc_x64_lib/mswu")
-  else()
-    set(BYEDPI_WX_SETUP_DIR "${wxWidgets_BINARY_DIR}/lib/gcc_lib/mswu")
-  endif()
+  set(BYEDPI_WX_SETUP_DIR "${wxWidgets_BINARY_DIR}/lib/gcc_x64_lib/mswu")
   target_include_directories(ByeDPILauncher PRIVATE
     "${CMAKE_SOURCE_DIR}/third_party/wxWidgets/include"
     "${BYEDPI_WX_SETUP_DIR}")
   if(MINGW)
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-      target_link_options(ByeDPILauncher PRIVATE -nostdlib -Wl,-e,wWinMainCRTStartup -Wl,--subsystem,windows)
-    else()
-      target_link_options(ByeDPILauncher PRIVATE -nostdlib "-Wl,-e,_wWinMainCRTStartup@0" -Wl,--subsystem,windows)
-    endif()
+    target_link_options(ByeDPILauncher PRIVATE -nostdlib -Wl,-e,wWinMainCRTStartup -Wl,--subsystem,windows)
     target_link_libraries(ByeDPILauncher PRIVATE kernel32 shell32 user32)
   endif()
   add_executable(windows_proxy_tests tests/windows_proxy.cpp src/system_proxy_win.cpp)
@@ -103,7 +98,7 @@ if(WIN32)
   target_link_libraries(windows_proxy_tests PRIVATE wx::base wininet)
   add_test(NAME windows_proxy_roundtrip COMMAND windows_proxy_tests)
 elseif(APPLE)
-  target_sources(ByeDPI PRIVATE src/system_proxy_mac.cpp assets/icon.icns)
+  target_sources(ByeDPI PRIVATE src/system_proxy_mac.cpp src/vpn_mac.cpp assets/icon.icns)
   set_source_files_properties(assets/icon.icns PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
   target_link_libraries(ByeDPI PRIVATE "-framework SystemConfiguration" "-framework Security")
 else()
@@ -119,6 +114,10 @@ if(APPLE)
   target_compile_definitions(mac_proxy_tests PRIVATE BYEDPI_PROXY_TEST)
   target_link_libraries(mac_proxy_tests PRIVATE wx::base "-framework SystemConfiguration" "-framework Security")
   add_test(NAME mac_proxy_values COMMAND mac_proxy_tests)
+  add_executable(mac_vpn_tests tests/vpn_mac.cpp src/vpn_mac.cpp)
+  target_include_directories(mac_vpn_tests PRIVATE src)
+  target_link_libraries(mac_vpn_tests PRIVATE wx::base "-framework SystemConfiguration")
+  add_test(NAME mac_vpn_physical_network COMMAND mac_vpn_tests)
 endif()
 if(MINGW)
   target_link_options(ByeDPI PRIVATE -static -static-libgcc -static-libstdc++)
@@ -128,8 +127,8 @@ set_target_properties(ByeDPI PROPERTIES
   OUTPUT_NAME "HelloAndByeDPI"
   MACOSX_BUNDLE_ICON_FILE "icon.icns"
   MACOSX_BUNDLE_BUNDLE_NAME "HelloAndByeDPI"
-  MACOSX_BUNDLE_BUNDLE_VERSION "0.6.1"
-  MACOSX_BUNDLE_SHORT_VERSION_STRING "0.6.1")
+  MACOSX_BUNDLE_BUNDLE_VERSION "0.6.2"
+  MACOSX_BUNDLE_SHORT_VERSION_STRING "0.6.2")
 add_dependencies(ByeDPI ciadpi)
 add_custom_command(TARGET ByeDPI POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ciadpi> $<TARGET_FILE_DIR:ByeDPI>
@@ -147,11 +146,28 @@ endforeach()
 if(WIN32)
   add_custom_command(TARGET ByeDPI POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy
     "${CMAKE_SOURCE_DIR}/third_party/curl/COPYING" "$<TARGET_FILE_DIR:ByeDPI>/licenses/curl.txt")
-  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    add_custom_command(TARGET ByeDPI POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/windows-x64/tun2socks.exe" "$<TARGET_FILE_DIR:ByeDPI>/tun2socks.exe"
-      COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/windows-x64/wintun.dll" "$<TARGET_FILE_DIR:ByeDPI>/wintun.dll"
-      COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/licenses/tun2socks.txt" "$<TARGET_FILE_DIR:ByeDPI>/licenses/tun2socks.txt"
-      COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/licenses/Wintun.txt" "$<TARGET_FILE_DIR:ByeDPI>/licenses/Wintun.txt")
+  add_custom_command(TARGET ByeDPI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/windows-x64/tun2socks.exe" "$<TARGET_FILE_DIR:ByeDPI>/tun2socks.exe"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/windows-x64/wintun.dll" "$<TARGET_FILE_DIR:ByeDPI>/wintun.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/licenses/tun2socks.txt" "$<TARGET_FILE_DIR:ByeDPI>/licenses/tun2socks.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/licenses/Wintun.txt" "$<TARGET_FILE_DIR:ByeDPI>/licenses/Wintun.txt")
+elseif(APPLE)
+  if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+    set(BYEDPI_MAC_VPN_ARCH arm64)
+  elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+    set(BYEDPI_MAC_VPN_ARCH x86_64)
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    set(BYEDPI_MAC_VPN_ARCH arm64)
+  else()
+    set(BYEDPI_MAC_VPN_ARCH x86_64)
   endif()
+  set(BYEDPI_MAC_TUN2SOCKS "${CMAKE_SOURCE_DIR}/third_party/vpn/macos-${BYEDPI_MAC_VPN_ARCH}/tun2socks")
+  if(NOT EXISTS "${BYEDPI_MAC_TUN2SOCKS}")
+    message(FATAL_ERROR "Run python3 scripts/fetch_macos_vpn.py ${BYEDPI_MAC_VPN_ARCH} first")
+  endif()
+  add_custom_command(TARGET ByeDPI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ByeDPI>/lib"
+    COMMAND ${CMAKE_COMMAND} -E copy "${BYEDPI_MAC_TUN2SOCKS}" "$<TARGET_FILE_DIR:ByeDPI>/lib/tun2socks"
+    COMMAND chmod 755 "$<TARGET_FILE_DIR:ByeDPI>/lib/tun2socks"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/licenses/tun2socks.txt" "$<TARGET_FILE_DIR:ByeDPI>/licenses/tun2socks.txt")
 endif()

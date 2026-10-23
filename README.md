@@ -9,7 +9,6 @@ The interface is available in English and Russian.
 Choose the package for your system from [GitHub Releases](https://github.com/LeraZybin/HelloAndByeDPI/releases):
 
 - **Windows x64:** proxy and system-wide VPN modes.
-- **Windows x86:** proxy mode for 32-bit Windows.
 - **macOS Intel:** macOS 10.13 or newer, including the 2013 Intel MacBook Air.
 - **macOS Apple Silicon:** macOS 11 or newer.
 
@@ -19,12 +18,13 @@ The builds are currently unsigned. Windows SmartScreen or macOS Gatekeeper may s
 
 1. Download and extract the package. On Windows, keep the entire folder together.
 2. Run `HelloAndByeDPI`.
-3. Select a strategy and, on Windows x64, choose **Proxy** or **VPN** mode.
+3. Select a strategy and choose **Proxy** or **VPN** mode.
 4. Click **Turn on**.
 
 Proxy mode configures the operating system automatically. Applications that use the system proxy require no manual setup. If automatic configuration is disabled, use `127.0.0.1:1080`; the local engine accepts SOCKS5 and HTTP CONNECT.
 
-VPN mode routes IPv4 traffic through ByeDPI using tun2socks and Wintun. Windows will request administrator permission when the adapter and routes are configured.
+VPN mode routes IPv4 traffic through ByeDPI using tun2socks. Windows uses Wintun; macOS uses a native `utun` adapter. The operating system requests administrator permission when routes are configured.
+On macOS, the permission prompt appears once when VPN mode starts. The privileged tunnel supervisor removes its routes when you disconnect or if the application exits unexpectedly.
 
 ## Strategy testing
 
@@ -39,7 +39,7 @@ Test results depend on the provider, network, and active DPI equipment. A strate
 - Minimal and full interface modes.
 - English and Russian localization.
 - Automatic system proxy setup and rollback.
-- Windows x64 VPN mode.
+- System-wide VPN mode on Windows x64 and macOS.
 - 60 built-in strategies, favorites, and custom strategies.
 - Strategy testing with custom site lists, timeouts, retries, and CSV export.
 - Recovery of network settings after an interrupted session.
@@ -52,9 +52,8 @@ On Windows, the log is written to `HelloAndByeDPI.log` beside the executable.
 | Platform | Supported target | Available modes |
 |---|---|---|
 | Windows 8/8.1, 10, 11 x64 | 64-bit | Proxy and VPN |
-| Windows 8/8.1, 10, 11 x86 | 32-bit | Proxy |
-| macOS Intel | 10.13+ | Proxy |
-| macOS Apple Silicon | 11+ | Proxy |
+| macOS Intel | 10.13+ | Proxy and VPN |
+| macOS Apple Silicon | 11+ | Proxy and VPN |
 
 Windows 8 compatibility is a build target and should still be verified on physical Windows 8 hardware. VPN mode has been tested on Windows 10 behind an active DPI connection.
 
@@ -69,7 +68,7 @@ cmake --build build -j 4
 ctest --test-dir build --output-on-failure
 ```
 
-For Windows, use MSYS2 MINGW64 or MINGW32. MSVC is not supported by the bundled engine configuration. The complete CI configuration is in [`.github/workflows/build.yml`](.github/workflows/build.yml).
+For Windows, use MSYS2 MINGW64. MSVC and 32-bit Windows builds are not supported. The complete CI configuration is in [`.github/workflows/build.yml`](.github/workflows/build.yml).
 
 ## Third-party projects
 
