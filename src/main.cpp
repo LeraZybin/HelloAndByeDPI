@@ -25,6 +25,10 @@
 #include <windows.h>
 #endif
 
+#ifndef BYEDPI_APP_VERSION
+#define BYEDPI_APP_VERSION "development"
+#endif
+
 static bool smokeTest = false;
 static bool systemProxySmoke = false;
 static bool startVpnElevated = false;
@@ -155,16 +159,22 @@ class MainFrame : public wxFrame {
         Log("[" + wxDateTime::Now().FormatISOCombined(' ') + "] " + text + "\n");
     }
     void InitializeLog() {
+#ifdef __APPLE__
+        wxString directory = wxStandardPaths::Get().GetUserDataDir();
+        wxFileName::Mkdir(directory, 0700, wxPATH_MKDIR_FULL);
+        logPath_ = directory + "/HelloAndByeDPI.log";
+#else
         logPath_ = ApplicationRoot() + "/HelloAndByeDPI.log";
-        if (wxFileExists(logPath_) && wxFileName(logPath_).GetSize() > 2 * 1024 * 1024)
-            wxRenameFile(logPath_, logPath_ + ".old", true);
         wxFFile test(logPath_, "ab");
         if (!test.IsOpened()) {
             wxString directory = wxStandardPaths::Get().GetUserDataDir();
             wxFileName::Mkdir(directory, 0700, wxPATH_MKDIR_FULL);
             logPath_ = directory + "/HelloAndByeDPI.log";
         } else test.Close();
-        Event("=== HelloAndByeDPI 0.6.3 session ===");
+#endif
+        if (wxFileExists(logPath_) && wxFileName(logPath_).GetSize() > 2 * 1024 * 1024)
+            wxRenameFile(logPath_, logPath_ + ".old", true);
+        Event("=== HelloAndByeDPI " BYEDPI_APP_VERSION " session ===");
         Event("OS: " + wxGetOsDescription() + wxString::Format("; process architecture: %zu-bit; PID: %lu", sizeof(void*) * 8, static_cast<unsigned long>(wxGetProcessId())));
         Event("Executable: " + wxStandardPaths::Get().GetExecutablePath());
         Event("Log file: " + logPath_);
@@ -556,7 +566,7 @@ public:
             if (!pid_) Destroy();
         });
     }
-    MainFrame() : wxFrame(nullptr, wxID_ANY, "HelloAndByeDPI", wxDefaultPosition, wxSize(700, 650)), timer_(this) {
+    MainFrame() : wxFrame(nullptr, wxID_ANY, "HelloAndByeDPI " BYEDPI_APP_VERSION, wxDefaultPosition, wxSize(700, 650)), timer_(this) {
         SetMinSize(wxSize(560, 580));
 #ifdef __WXMSW__
         SetIcon(wxIcon("IDI_APP_ICON", wxBITMAP_TYPE_ICO_RESOURCE));
@@ -574,7 +584,7 @@ public:
         language_->SetSelection(English() ? 1 : 0); header->Add(language_, 0, wxRIGHT, 8);
         mode_ = new wxButton(panel, wxID_ANY, L("Полная версия")); header->Add(mode_);
         root->Add(header, 0, wxEXPAND | wxALL, 18);
-        auto title = new wxStaticText(panel, wxID_ANY, "HelloAndByeDPI");
+        auto title = new wxStaticText(panel, wxID_ANY, "HelloAndByeDPI " BYEDPI_APP_VERSION);
         title->SetFont(title->GetFont().Larger().Larger().Bold());
         root->Add(title, 0, wxLEFT | wxRIGHT | wxBOTTOM, 18);
         toggle_ = new wxButton(panel, wxID_ANY, L("Включить"), wxDefaultPosition, wxSize(-1, 76));

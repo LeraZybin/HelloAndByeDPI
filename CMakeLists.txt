@@ -79,6 +79,7 @@ add_test(NAME http_probe_model COMMAND http_probe_tests "${CMAKE_SOURCE_DIR}/dat
 add_executable(probe_integration tests/probe_integration.cpp)
 target_link_libraries(probe_integration PRIVATE http_probe)
 add_executable(ByeDPI WIN32 MACOSX_BUNDLE src/main.cpp src/proxy_journal.cpp src/policy_test.cpp)
+target_compile_definitions(ByeDPI PRIVATE BYEDPI_APP_VERSION="${PROJECT_VERSION}")
 if(WIN32)
   configure_file(src/app.rc.in ${CMAKE_CURRENT_BINARY_DIR}/app.rc @ONLY)
   target_sources(ByeDPI PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/app.rc src/system_proxy_win.cpp src/vpn_win.cpp)
@@ -169,5 +170,7 @@ elseif(APPLE)
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ByeDPI>/lib"
     COMMAND ${CMAKE_COMMAND} -E copy "${BYEDPI_MAC_TUN2SOCKS}" "$<TARGET_FILE_DIR:ByeDPI>/lib/tun2socks"
     COMMAND chmod 755 "$<TARGET_FILE_DIR:ByeDPI>/lib/tun2socks"
-    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/licenses/tun2socks.txt" "$<TARGET_FILE_DIR:ByeDPI>/licenses/tun2socks.txt")
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/third_party/vpn/licenses/tun2socks.txt" "$<TARGET_FILE_DIR:ByeDPI>/licenses/tun2socks.txt"
+    COMMAND ${CMAKE_COMMAND} -E rm -f "$<TARGET_FILE_DIR:ByeDPI>/HelloAndByeDPI.log"
+    COMMAND /usr/bin/codesign --force --deep --sign - "$<TARGET_BUNDLE_DIR:ByeDPI>")
 endif()
