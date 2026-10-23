@@ -164,7 +164,7 @@ class MainFrame : public wxFrame {
             wxFileName::Mkdir(directory, 0700, wxPATH_MKDIR_FULL);
             logPath_ = directory + "/HelloAndByeDPI.log";
         } else test.Close();
-        Event("=== HelloAndByeDPI 0.6.2 session ===");
+        Event("=== HelloAndByeDPI 0.6.3 session ===");
         Event("OS: " + wxGetOsDescription() + wxString::Format("; process architecture: %zu-bit; PID: %lu", sizeof(void*) * 8, static_cast<unsigned long>(wxGetProcessId())));
         Event("Executable: " + wxStandardPaths::Get().GetExecutablePath());
         Event("Log file: " + logPath_);
@@ -240,7 +240,7 @@ class MainFrame : public wxFrame {
         std::vector<wxString> args{executable.GetFullPath(), "--device",
             "tun://HelloAndByeDPI?guid={A18F60A0-0D7B-4A41-925E-BA2DAB87C847}",
             "--proxy", wxString::Format("socks5://127.0.0.1:%d", port_->GetValue()),
-            "--mtu", "1500", "--loglevel", "debug"};
+            "--mtu", "1500", "--loglevel", "warn"};
         std::vector<const wchar_t*> argv; for (const auto& arg : args) argv.push_back(arg.wc_str()); argv.push_back(nullptr);
         wxString command; for (const auto& arg : args) command += wxString(command.empty() ? "" : " ") + "\"" + arg + "\"";
         Event("tun2socks command: " + command);

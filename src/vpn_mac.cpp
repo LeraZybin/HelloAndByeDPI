@@ -143,7 +143,7 @@ wxString VpnStartMacTunnel(const wxString& tun2socks, const wxString& deviceName
         "rm -f " + stop + " " + status + "; ( "
         "trap 'kill $child 2>/dev/null; wait $child 2>/dev/null' EXIT TERM INT; " +
         tun + " --device " + device + " --proxy " + ShellQuote(proxy) + " --interface " +
-        ShellQuote(physicalInterface) + " --mtu 1500 --loglevel debug >> " + log + " 2>&1 & child=$!; "
+        ShellQuote(physicalInterface) + " --mtu 1500 --loglevel warn >> " + log + " 2>&1 & child=$!; "
         "i=0; while [ $i -lt 100 ] && ! /sbin/ifconfig " + device + " >/dev/null 2>&1; do "
         "kill -0 $child 2>/dev/null || exit 1; i=$((i+1)); sleep 0.1; done; "
         "kill -0 $child 2>/dev/null || exit 1; "
