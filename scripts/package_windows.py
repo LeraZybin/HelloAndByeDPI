@@ -24,7 +24,9 @@ vpn_text = '''Режим VPN направляет IPv4-трафик всех п�
 запуске Windows запросит права администратора и установит подписанный драйвер
 Wintun. Настройка адаптера выполняется в фоне, окно остаётся доступным.
 '''
-readme = f'''HelloAndByeDPI 0.6.3 — Windows x64
+version = next(line.split('=', 1)[1] for line in (build / 'CMakeCache.txt').read_text().splitlines()
+               if line.startswith('CMAKE_PROJECT_VERSION:STATIC='))
+readme = f'''HelloAndByeDPI {version} — Windows x64
 
 Распакуйте весь архив в одну папку и запустите HelloAndByeDPI.exe.
 Не запускайте приложение прямо из ZIP. Каталоги lib, data и licenses,

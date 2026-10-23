@@ -5,6 +5,20 @@
 #include <cstdlib>
 void check(bool ok) { if (!ok) { std::cerr << "Check failed\n"; std::exit(1); } }
 int main(int argc, char** argv) {
+    // Actual macOS HTTP/2 regression: YouTube returned HTTP 200, then curl
+    // reported receive error 56 after our deliberate 64 KiB callback abort.
+    for (int code : {23, 56}) {
+        ProbeResult response; response.http = 200; response.transportCode = code;
+        response.sampleLimited = true;
+        ClassifyProbeResult(response, "Failure writing output to destination");
+        check(response.available && response.responded && response.error.empty());
+        response.sampleLimited = false;
+        ClassifyProbeResult(response, "truncated or failed response");
+        check(!response.available && !response.responded && !response.error.empty());
+        response.sampleLimited = true; response.http = 403;
+        ClassifyProbeResult(response, "Failure writing output to destination");
+        check(!response.available && response.responded && response.error == "HTTP 403");
+    }
     auto sites = ParseSites("\xef\xbb\xbf# comment\nExample.COM\nhttps://example.com/\nhttps://example.com/Case#fragment\nhttp://localhost:1234/x?q=1\n");
     check(sites.size() == 3 && sites[0] == "https://example.com/" && sites[1] == "https://example.com/Case");
     for (auto bad : {"file:///tmp/test", "ftp://host", "https://", "https://user:password@host", "https://a b"}) {

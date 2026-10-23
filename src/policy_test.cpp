@@ -3,6 +3,10 @@
 #include "http_probe.h"
 #include "ui.h"
 #include "app_paths.h"
+#include "vpn.h"
+#include "diagnostics.h"
+#include "dns_choice.h"
+#include "vpn_preflight.h"
 #include <wx/wx.h>
 #include <wx/checklst.h>
 #include <wx/config.h>
@@ -17,6 +21,8 @@
 #include <algorithm>
 #include <set>
 #include <sstream>
+#include <future>
+#include <chrono>
 
 namespace {
 wxString W(const std::string& s) { return wxString::FromUTF8(s.c_str()); }
@@ -57,7 +63,7 @@ struct Run {
     }
 };
 class Tester : public wxDialog {
-    enum Phase { Idle, Next, Starting, Probing, Stopping } phase_ = Idle;
+    enum Phase { Idle, Next, Starting, TunnelStarting, Probing, Stopping, TunnelStopping } phase_ = Idle;
     wxCheckListBox *policiesBox_, *groupsBox_;
     wxTextCtrl *custom_, *sni_, *description_, *customPolicy_, *customDns_;
     wxSpinCtrl *timeout_, *attempts_, *parallel_;
@@ -66,16 +72,22 @@ class Tester : public wxDialog {
     wxButton *customSitesToggle_, *customPolicyToggle_;
     wxStaticText *progress_, *catalogLabel_;
     wxGauge* gauge_;
-    wxChoice *language_, *dns_;
+    wxChoice *language_, *dns_, *networkMode_;
     wxButton* mode_;
     wxBoxSizer* root_;
     wxSizerItem *customSitesItem_ = nullptr, *customPolicyItem_ = nullptr;
+    wxSizerItem* dnsRowItem_ = nullptr;
     std::vector<wxSizerItem*> advanced_;
     std::vector<wxString> dnsValues_;
     bool full_ = false, applying_ = false;
     bool customSitesExpanded_ = false, customPolicyExpanded_ = false;
     void Presentation() {
         for (auto item : advanced_) item->Show(full_);
+        if (dnsRowItem_) dnsRowItem_->Show(full_ || networkMode_->GetSelection() == 1);
+#ifdef __APPLE__
+        dns_->Enable(phase_ == Idle && networkMode_->GetSelection() == 1);
+        customDns_->Enable(phase_ == Idle && networkMode_->GetSelection() == 1);
+#endif
         if (customSitesItem_) customSitesItem_->Show(full_ && customSitesExpanded_);
         if (customPolicyItem_) customPolicyItem_->Show(full_ && customPolicyExpanded_);
         if (customSitesToggle_) customSitesToggle_->SetLabel(L(customSitesExpanded_ ? "Свернуть свои сайты" : "Свои сайты…"));
@@ -96,12 +108,9 @@ class Tester : public wxDialog {
     void LanguageChanged() {
         TranslateWindow(this);
         language_->SetSelection(English() ? 1 : 0);
-#ifdef __WXMSW__
-        dns_->SetString(0, L("Системный"));
-        dns_->SetString(1, "Google (8.8.8.8)"); dns_->SetString(2, "Cloudflare (1.1.1.1)");
-        dns_->SetString(3, "Quad9 (9.9.9.9)"); dns_->SetString(4, L("Яндекс") + " (77.88.8.8)");
-        dns_->SetString(5, L("Пользовательский"));
-#endif
+        networkMode_->SetString(0, L("SOCKS5-прокси"));
+        networkMode_->SetString(1, L("VPN — все приложения"));
+        TranslateDnsChoice(dns_);
         int supported = 0; for (auto& policy : policies_) supported += policy.reason.empty();
         catalogLabel_->SetLabel(wxString::Format(L("Политики: %zu · совместимы с этой ОС: %d"), policies_.size(), supported));
         for (size_t i = 0; i < groups_.size(); ++i) groupsBox_->SetString(i, Translate(groups_[i].name) + wxString::FromUTF8(" · ") + wxString::Format("%zu", ParseSites(U(groups_[i].text)).size()));
@@ -135,6 +144,85 @@ class Tester : public wxDialog {
     wxString chosen_;
     bool smoke_ = false, earlySmoke_ = false;
     int smokeResult_ = 1;
+    bool vpnSmoke_ = false;
+    bool vpn_ = false, tunnelStarted_ = false, configuring_ = false, tunnelAuthorized_ = false;
+    VpnPhysicalNetwork physical_{"", 0};
+    wxString device_, stopFile_, statusFile_, tunnelLog_;
+    std::future<wxString> tunnelFuture_;
+    wxProcess* tunnelProcess_ = nullptr;
+    long tunnelPid_ = 0;
+    int tunnelTicks_ = 0;
+    wxString testLog_;
+    void TestLog(const wxString& message) {
+        if (testLog_.empty()) return;
+        wxFile file(testLog_, wxFile::write_append);
+        wxString line = "[" + wxDateTime::Now().FormatISOCombined(' ') + "] " + message + "\n";
+        auto bytes = line.utf8_str();
+        if (file.IsOpened()) file.Write(bytes.data(), bytes.length());
+    }
+    void StartTunnel() {
+        device_ = "HelloAndByeDPI";
+#ifdef __APPLE__
+        device_ = "utun233";
+        for (int unit = 233; unit < 250 && VpnAdapterReady(device_); ++unit)
+            device_ = wxString::Format("utun%d", unit + 1);
+        if (VpnAdapterReady(device_)) throw std::runtime_error("No free utun interface.");
+        const wxString prefix = wxString::Format("/tmp/org.helloandbyedpi.test.%lu", static_cast<unsigned long>(wxGetProcessId()));
+        stopFile_ = prefix + ".stop"; statusFile_ = prefix + ".status";
+        wxString dir = DiagnosticDirectory(wxStandardPaths::Get().GetUserDataDir());
+        wxFileName::Mkdir(dir, 0700, wxPATH_MKDIR_FULL);
+        tunnelLog_ = dir + "/policy-vpn.log";
+        wxString binary = ApplicationRoot() + "/lib/tun2socks";
+        if (!wxFileName(binary).IsFileExecutable()) throw std::runtime_error("Missing lib/tun2socks.");
+        wxString device = device_, stop = stopFile_, status = statusFile_, log = tunnelLog_;
+        wxString proxy = wxString::Format("socks5://127.0.0.1:%d", port_);
+        wxString iface = physical_.interfaceName, dns = ValidateDns(DnsServer());
+        TestLog("VPN DNS: " + (dns.empty() ? "system" : dns));
+        tunnelFuture_ = std::async(std::launch::async, [binary, device, proxy, iface, stop, status, log, dns] {
+            return VpnStartMacTunnel(binary, device, proxy, iface,
+                static_cast<unsigned long>(wxGetProcessId()), stop, status, log, dns);
+        });
+        configuring_ = true;
+#else
+        wxString binary = ApplicationRoot() + "/lib/tun2socks.exe";
+        if (!wxFileExists(binary)) throw std::runtime_error("Missing lib/tun2socks.exe.");
+        std::vector<wxString> args{binary, "--device", "tun://HelloAndByeDPI?guid={A18F60A0-0D7B-4A41-925E-BA2DAB87C847}",
+            "--proxy", wxString::Format("socks5://127.0.0.1:%d", port_), "--mtu", "1500", "--loglevel", DiagnosticLogging() ? "debug" : "warning"};
+        std::vector<const wchar_t*> argv; for (auto& arg : args) argv.push_back(arg.wc_str()); argv.push_back(nullptr);
+        tunnelProcess_ = new wxProcess(this);
+        tunnelPid_ = wxExecute(argv.data(), wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE, tunnelProcess_);
+        if (!tunnelPid_) { delete tunnelProcess_; tunnelProcess_ = nullptr; throw std::runtime_error("Could not start tun2socks."); }
+#endif
+        tunnelStarted_ = true; tunnelTicks_ = 0; phase_ = TunnelStarting;
+        tunnelAuthorized_ = false;
+        if (smoke_) fprintf(stderr, "VPN smoke: tunnel startup requested\n");
+        progress_->SetLabel(L("Создание VPN-адаптера…"));
+    }
+    bool TunnelReady() {
+        if (configuring_) {
+            if (tunnelFuture_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return false;
+            configuring_ = false; auto diagnostic = tunnelFuture_.get();
+            tunnelAuthorized_ = true;
+            runs_[current_].diagnostic += diagnostic + "\n";
+#ifdef __WXMSW__
+            return true;
+#endif
+        }
+#ifdef __APPLE__
+        if (VpnMacTunnelStopped(statusFile_)) throw std::runtime_error("VPN startup failed; see " + U(tunnelLog_));
+        return VpnAdapterReady(device_) && VpnMacTunnelReady(statusFile_);
+#else
+        if (VpnAdapterReady(device_)) {
+            wxString device = device_, dns = ValidateDns(DnsServer());
+            tunnelFuture_ = std::async(std::launch::async, [device, dns] {
+                try { return VpnCleanup(device) + "\n" + VpnConfigure(device, dns); }
+                catch (...) { VpnCleanup(device); throw; }
+            });
+            configuring_ = true;
+        }
+        return false;
+#endif
+    }
     std::vector<std::string> Arguments(const wxString& text) {
         return parseArguments(U(text), IsMac());
     }
@@ -180,13 +268,20 @@ class Tester : public wxDialog {
         }
     }
     void Controls(bool idle) {
+        networkMode_->Enable(idle);
         policiesBox_->Enable(idle); groupsBox_->Enable(idle); custom_->Enable(idle);
         timeout_->Enable(idle); attempts_->Enable(idle); parallel_->Enable(idle); sni_->Enable(idle);
         start_->Enable(idle); import_->Enable(idle); all_->Enable(idle); none_->Enable(idle);
         customPolicy_->Enable(idle); addPolicy_->Enable(idle); dns_->Enable(idle);
+#ifdef __APPLE__
+        dns_->Enable(idle && networkMode_->GetSelection() == 1);
+#endif
         customSitesToggle_->Enable(idle); customPolicyToggle_->Enable(idle);
         customDns_->Enable(idle && !dnsValues_.empty() && dnsValues_.back() == "custom" &&
             dns_->GetSelection() == static_cast<int>(dnsValues_.size() - 1));
+#ifdef __APPLE__
+        if (networkMode_->GetSelection() != 1) customDns_->Disable();
+#endif
         cancel_->Enable(!idle); export_->Enable(idle && !runs_.empty());
         apply_->Enable(idle && selected_ >= 0 && runs_[selected_].id > 0 && runs_[selected_].complete && !runs_[selected_].failed);
     }
@@ -199,7 +294,10 @@ class Tester : public wxDialog {
         config_.Write("parallel", parallel_->GetValue());
         config_.Write("custom_policy", customPolicy_->GetValue());
         config_.Write("dns_server", DnsServer());
+        config_.Write("vpn_mode", networkMode_->GetSelection() == 1);
         for (size_t i = 0; i < groups_.size(); ++i) config_.Write(groups_[i].filename, groupsBox_->IsChecked(i));
+        for (size_t i = 0; i < policies_.size(); ++i)
+            config_.Write(wxString::Format("selected_policy/%d", policies_[i].id), policiesBox_->IsChecked(i));
         config_.Flush();
     }
     void Details() {
@@ -287,13 +385,40 @@ class Tester : public wxDialog {
     }
     void Begin() {
         try {
+            wxString dir = DiagnosticDirectory(wxStandardPaths::Get().GetUserDataDir());
+            wxFileName::Mkdir(dir, 0700, wxPATH_MKDIR_FULL);
+            testLog_ = dir + "/policy-test.log";
+            if (wxFileExists(testLog_) && wxFileName(testLog_).GetSize() > 2 * 1024 * 1024)
+                wxRenameFile(testLog_, testLog_ + ".old", true);
+            vpn_ = networkMode_->GetSelection() == 1;
+            TestLog(vpn_ ? "=== VPN policy test ===" : "=== SOCKS5 policy test ===");
+            TestLog("Probe runtime: " + W(ProbeRuntime()));
+            wxString diagnostic;
+            if (!VpnPreflight(this, diagnostic)) { TestLog(diagnostic); return; }
+            port_ = 0;
+            if (vpn_) {
+                ValidateDns(DnsServer());
+#ifdef __WXMSW__
+                if (!VpnIsAdministrator()) {
+                    SaveSettings();
+                    if (!VpnRelaunchElevated(wxStandardPaths::Get().GetExecutablePath(), true))
+                        throw std::runtime_error(U(L("Для VPN-режима нужны права администратора.")));
+                    wxWindow* parent = GetParent();
+                    EndModal(wxID_CANCEL);
+                    if (parent) parent->CallAfter([parent] { parent->Close(); });
+                    return;
+                }
+#endif
+                physical_ = VpnFindPhysicalNetwork();
+                TestLog("Physical interface: " + physical_.interfaceName + " address=" + physical_.address);
+            }
             wxString allSites = custom_->GetValue() + "\n";
             for (size_t i = 0; i < groups_.size(); ++i) if (groupsBox_->IsChecked(i)) allSites += groups_[i].text + "\n";
             auto sites = ParseSites(U(allSites));
             if (sites.empty()) throw std::runtime_error(U(L("Выберите хотя бы один список сайтов или добавьте свои адреса.")));
             std::vector<Run> runs;
             Run direct; direct.id = 0; direct.name = L("Напрямую (контроль)"); direct.status = L("Ожидает"); runs.push_back(direct);
-            Run plain; plain.id = -1; plain.name = L("Прокси без обхода (контроль)"); plain.status = L("Ожидает"); runs.push_back(plain);
+            Run plain; plain.id = -1; plain.name = L(vpn_ ? "VPN без обхода (контроль)" : "Прокси без обхода (контроль)"); plain.status = L("Ожидает"); runs.push_back(plain);
             for (size_t i = 0; i < policies_.size(); ++i) if (policiesBox_->IsChecked(i)) {
                 Run run; run.id = policies_[i].id; run.name = wxString::Format(L("Политика %02d"), run.id);
                 run.arguments = Resolve(policies_[i].arguments); run.status = L("Ожидает");
@@ -311,13 +436,27 @@ class Tester : public wxDialog {
         } catch (const std::exception& e) { wxMessageBox(W(e.what()), L("Тест политик"), wxOK | wxICON_WARNING, this); }
     }
     void Finish() {
+        if (tunnelStarted_) {
+            phase_ = TunnelStopping; tunnelTicks_ = 0;
+            batch_.reset();
+            progress_->SetLabel(L("Остановка теста…"));
+            return;
+        }
         timer_.Stop(); batch_.reset(); phase_ = Idle;
         progress_->SetLabel(cancelled_ ? L("Остановлено. Частичные результаты сохранены в таблице.") : L("Готово. Нажмите на стратегию, чтобы применить."));
         if (!cancelled_) gauge_->SetValue(1000);
         Summary(); Controls(true);
         if (smoke_) {
-            bool valid = runs_.size() == 3 && (earlySmoke_ ? cancelled_ && applying_ && !chosen_.empty() : !cancelled_);
-            for (auto& run : runs_) valid = valid && run.complete && !run.failed && run.results.size() == 2 && run.Count(true) == 1 && run.Count(false) == 2;
+            bool valid = runs_.size() == (vpnSmoke_ ? 4 : 3) && (earlySmoke_ ? cancelled_ && applying_ && !chosen_.empty() : !cancelled_);
+            for (auto& run : runs_) {
+                valid = valid && run.complete && !run.failed;
+                if (vpnSmoke_) {
+                    valid = valid && run.results.size() == 4 && run.Count(true) >= 2 && run.Count(false) >= 3;
+                    for (const auto& result : run.results)
+                        if (run.id > 0 && result.url == "https://youtube.com/") valid = valid && result.available;
+                    for (const auto& result : run.results) fprintf(stderr, "%s %s HTTP=%ld error=%s\n", U(run.name).c_str(), result.url.c_str(), result.http, result.error.c_str());
+                } else valid = valid && run.results.size() == 2 && run.Count(true) == 1 && run.Count(false) == 2;
+            }
             if (valid) {
                 smokeResult_ = 0;
                 if (earlySmoke_) { EndModal(wxID_OK); return; }
@@ -333,10 +472,12 @@ class Tester : public wxDialog {
         else if (closing_) EndModal(wxID_CANCEL);
     }
     void StartEngine() {
+        if (!port_ || !vpn_) {
         wxIPV4address endpoint; endpoint.Hostname("127.0.0.1"); endpoint.Service(0);
         { wxSocketServer reserve(endpoint, wxSOCKET_NOWAIT);
           if (!reserve.IsOk() || !reserve.GetLocal(endpoint)) throw std::runtime_error(U(L("Не удалось выбрать свободный тестовый порт.")));
           port_ = endpoint.Service(); }
+        }
         wxFileName engine(ApplicationRoot() + "/ciadpi");
 #ifdef __WXMSW__
         engine.SetFullName("ciadpi.exe");
@@ -346,11 +487,14 @@ class Tester : public wxDialog {
         if (!engine.IsFileExecutable()) throw std::runtime_error(U(L("Не найден ciadpi рядом с приложением.")));
         auto parsed = Arguments(runs_[current_].arguments);
         std::vector<wxString> args{engine.GetFullPath(), "--ip", "127.0.0.1", "--port", wxString::Format("%d", port_)};
+        args.push_back("--debug"); args.push_back(DiagnosticLogging() ? "1" : "0");
 #ifdef __WXMSW__
-        args.push_back("--debug"); args.push_back("0");
         args.push_back("--wait-send");
 #endif
+        if (vpn_) { args.push_back("--conn-ip"); args.push_back(physical_.address); }
         for (auto& argument : parsed) args.push_back(W(argument));
+        wxString command; for (const auto& arg : args) command += " \"" + arg + "\"";
+        TestLog(runs_[current_].name + " engine:" + command);
         std::vector<const wchar_t*> argv; for (auto& argument : args) argv.push_back(argument.wc_str()); argv.push_back(nullptr);
         process_ = new wxProcess(this); process_->Redirect();
         pid_ = wxExecute(argv.data(), wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE, process_);
@@ -359,7 +503,8 @@ class Tester : public wxDialog {
         runs_[current_].status = L("Запуск движка");
     }
     void StartBatch() {
-        batch_.reset(new ProbeBatch(sites_, runAttempts_, timeout_->GetValue(), parallel_->GetValue(), runs_[current_].id == 0 ? 0 : port_, U(DnsServer())));
+        batch_.reset(new ProbeBatch(sites_, runAttempts_, timeout_->GetValue(), parallel_->GetValue(),
+            vpn_ || runs_[current_].id == 0 ? 0 : port_, U(DnsServer()), vpn_));
         runs_[current_].status = L("Проверка сайтов"); phase_ = Probing;
     }
     void StopEngine() {
@@ -374,11 +519,37 @@ class Tester : public wxDialog {
         for (int i = 0; i < 8 && stream->CanRead(); ++i) {
             stream->Read(data, sizeof(data)); size_t n = stream->LastRead(); if (!n) break;
             auto& log = runs_[current_].diagnostic;
-            if (log.size() < 16000) log += wxString::FromUTF8(data, n);
+            wxString message = wxString::FromUTF8(data, n);
+            if (DiagnosticLogging() || log.size() < 16000) TestLog(message);
+            if (log.size() < 16000) log += message;
         }
     }
     void Tick(wxTimerEvent&) {
         try {
+            if (phase_ == TunnelStopping) {
+                if (configuring_) {
+                    if (tunnelFuture_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
+                    configuring_ = false;
+                    try { tunnelFuture_.get(); } catch (...) {}
+                }
+#ifdef __APPLE__
+                VpnStopMacTunnel(stopFile_);
+                if (VpnAdapterReady(device_) || (tunnelAuthorized_ && !VpnMacTunnelStopped(statusFile_))) {
+                    if (++tunnelTicks_ == 80) progress_->SetLabel(L("Остановка теста…") + " utun");
+                    return;
+                }
+#else
+                if (tunnelTicks_ == 0) {
+                    wxString device = device_;
+                    tunnelFuture_ = std::async(std::launch::async, [device] { return VpnCleanup(device); });
+                    configuring_ = true; ++tunnelTicks_; return;
+                }
+                if (tunnelPid_) { wxProcess::Kill(tunnelPid_, wxSIGKILL); return; }
+#endif
+                tunnelStarted_ = false;
+                if (smoke_) fprintf(stderr, "VPN smoke: tunnel stopped\n");
+                Finish(); return;
+            }
             if (process_) { Drain(process_->GetInputStream()); Drain(process_->GetErrorStream()); }
             if (phase_ == Next) {
                 while (current_ < runs_.size() && runs_[current_].failed) {
@@ -390,11 +561,28 @@ class Tester : public wxDialog {
             } else if (phase_ == Starting) {
                 wxIPV4address endpoint; endpoint.Hostname("127.0.0.1"); endpoint.Service(port_);
                 wxSocketClient connection; connection.SetTimeout(1);
-                if (connection.Connect(endpoint, true)) { StartBatch(); Summary(); }
+                if (connection.Connect(endpoint, true)) {
+                    if (vpn_ && !tunnelStarted_) StartTunnel();
+                    else { StartBatch(); Summary(); }
+                }
                 else if (++ticks_ >= 65) throw std::runtime_error(U(L("Движок не открыл тестовый порт.")));
+            } else if (phase_ == TunnelStarting) {
+                if (TunnelReady()) {
+                    if (smoke_) fprintf(stderr, "VPN smoke: tunnel ready: %s\n", U(device_).c_str());
+                    if (cancelled_) StopEngine(); else StartBatch();
+                    Summary();
+                } else if (!configuring_ && ++tunnelTicks_ >= 200) throw std::runtime_error("VPN adapter did not become ready. " + U(tunnelLog_));
             } else if (phase_ == Probing) {
+                if (vpn_ && runs_[current_].id != 0 && !VpnAdapterReady(device_))
+                    throw std::runtime_error("VPN adapter disappeared.");
                 auto completed = batch_->Poll();
                 auto& run = runs_[current_]; run.results.insert(run.results.end(), completed.begin(), completed.end());
+                for (const auto& result : completed)
+                    TestLog(run.name + " " + W(result.url) + wxString::Format(" HTTP=%ld available=%d transport=%d sampleLimited=%d DNS=%.1fms connect=%.1fms TLS=%.1fms total=%.1fms ",
+                        result.http, result.available, result.transportCode, result.sampleLimited, result.dnsMilliseconds,
+                        result.connectMilliseconds, result.tlsMilliseconds, result.milliseconds) +
+                        "local=" + W(result.localAddress) + " remote=" + W(result.remoteAddress) + " effective=" + W(result.effectiveUrl) + " " + W(result.error) +
+                        (result.diagnostic.empty() ? "" : "\n" + W(result.diagnostic)));
                 size_t planned = sites_.size() * runAttempts_;
                 progress_->SetLabel(wxString::Format(L("%zu/%zu · %s · запросов %zu/%zu"), current_ + 1, runs_.size(), run.name, run.results.size(), planned));
                 gauge_->SetValue(static_cast<int>(1000 * (current_ + static_cast<double>(run.results.size()) / planned) / runs_.size()));
@@ -412,15 +600,30 @@ class Tester : public wxDialog {
                 wxProcess::Kill(pid_, wxSIGKILL); ticks_ = 0;
             }
         } catch (const std::exception& e) {
+            if (phase_ == TunnelStopping) {
+                progress_->SetLabel(W(e.what())); return;
+            }
             auto& run = runs_[current_]; run.failed = true; run.complete = true;
+            if (vpn_) cancelled_ = true;
             run.status = L("Ошибка теста"); run.diagnostic += W(e.what()); StopEngine(); Summary();
         }
     }
     void End(wxProcessEvent& event) {
+        if (event.GetPid() == tunnelPid_) {
+            delete tunnelProcess_; tunnelProcess_ = nullptr; tunnelPid_ = 0;
+            if (phase_ != TunnelStopping && phase_ != Idle) {
+                cancelled_ = true;
+                runs_[current_].failed = true;
+                runs_[current_].diagnostic += wxString::Format("tun2socks exited (%d)", event.GetExitCode());
+                StopEngine();
+            }
+            return;
+        }
         if (event.GetPid() != pid_) return;
         Drain(process_->GetInputStream()); Drain(process_->GetErrorStream());
         delete process_; process_ = nullptr; pid_ = 0;
         if (phase_ != Stopping) {
+            if (vpn_) cancelled_ = true;
             auto& run = runs_[current_]; run.failed = true; run.complete = true;
             run.status = wxString::Format(L("Движок завершился (%d)"), event.GetExitCode()); batch_.reset();
         }
@@ -431,23 +634,24 @@ class Tester : public wxDialog {
         cancelled_ = true;
         if (current_ < runs_.size() && !runs_[current_].complete) runs_[current_].status = L("Прервано");
         cancel_->Disable(); progress_->SetLabel(L("Остановка теста…"));
+        if (phase_ == TunnelStopping || (phase_ == TunnelStarting && configuring_)) return;
         StopEngine();
     }
     void Export() {
         wxFileDialog dialog(this, L("Сохранить подробные результаты"), "", "byedpi-policy-results.csv", "CSV (*.csv)|*.csv", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dialog.ShowModal() != wxID_OK) return;
         std::ostringstream out;
-        out << "\xef\xbb\xbf" "date,policy,arguments,site,attempt,http,available,responded,milliseconds,error,sample_limited,policy_status\r\n";
+        out << "\xef\xbb\xbf" "date,mode,policy,arguments,site,attempt,http,available,responded,milliseconds,error,sample_limited,policy_status\r\n";
         for (auto& run : runs_) {
             for (auto& site : sites_) {
                 bool any = false;
                 for (auto& r : run.results) if (r.url == site) {
                     any = true;
-                    out << CsvCell(U(timestamp_)) << ',' << CsvCell(U(run.name)) << ',' << CsvCell(U(run.arguments)) << ',' << CsvCell(site)
+                    out << CsvCell(U(timestamp_)) << ',' << (run.id == 0 ? "Direct" : vpn_ ? "VPN" : "SOCKS5") << ',' << CsvCell(U(run.name)) << ',' << CsvCell(U(run.arguments)) << ',' << CsvCell(site)
                         << ',' << r.attempt << ',' << r.http << ',' << r.available << ',' << r.responded << ',' << r.milliseconds
                         << ',' << CsvCell(r.error) << ',' << r.sampleLimited << ',' << CsvCell(U(run.status)) << "\r\n";
                 }
-                if (!any) out << CsvCell(U(timestamp_)) << ',' << CsvCell(U(run.name)) << ',' << CsvCell(U(run.arguments)) << ',' << CsvCell(site)
+                if (!any) out << CsvCell(U(timestamp_)) << ',' << (run.id == 0 ? "Direct" : vpn_ ? "VPN" : "SOCKS5") << ',' << CsvCell(U(run.name)) << ',' << CsvCell(U(run.arguments)) << ',' << CsvCell(site)
                     << ",,,,,," << CsvCell(U(run.diagnostic)) << ",," << CsvCell(U(run.status)) << "\r\n";
             }
         }
@@ -455,8 +659,9 @@ class Tester : public wxDialog {
         if (!file.IsOpened() || file.Write(text.data(), text.size()) != text.size()) wxMessageBox(L("Не удалось сохранить CSV."));
     }
 public:
-    explicit Tester(wxWindow* parent, const wxString& smokeURL = "", bool applyEarly = false) : wxDialog(parent, wxID_ANY, L("HelloAndByeDPI · Тест стратегий"), wxDefaultPosition, wxSize(1100, 740), wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER), timer_(this) {
+    explicit Tester(wxWindow* parent, const wxString& smokeURL = "", bool applyEarly = false, bool vpn = false, const wxString& initialDns = "") : wxDialog(parent, wxID_ANY, L("HelloAndByeDPI · Тест стратегий"), wxDefaultPosition, wxSize(1100, 740), wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER), timer_(this) {
         smoke_ = !smokeURL.empty(); earlySmoke_ = applyEarly; SetEscapeId(wxID_NONE);
+        vpnSmoke_ = smoke_ && vpn;
         LoadCatalog(); SetMinSize(wxSize(920, 620));
         auto root = new wxBoxSizer(wxVERTICAL); root_ = root;
         auto header = new wxBoxSizer(wxHORIZONTAL); header->AddStretchSpacer();
@@ -464,6 +669,13 @@ public:
         language_->SetSelection(English() ? 1 : 0); header->Add(language_, 0, wxRIGHT, 8);
         mode_ = new wxButton(this, wxID_ANY, L("Полная версия")); header->Add(mode_);
         root->Add(header, 0, wxEXPAND | wxALL, 18);
+        auto networkRow = new wxBoxSizer(wxHORIZONTAL);
+        networkRow->Add(new wxStaticText(this, wxID_ANY, L("Режим подключения")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+        networkMode_ = new wxChoice(this, wxID_ANY);
+        networkMode_->Append(L("SOCKS5-прокси")); networkMode_->Append(L("VPN — все приложения"));
+        networkMode_->SetSelection(vpn ? 1 : 0);
+        networkRow->Add(networkMode_, 1);
+        root->Add(networkRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
         start_ = new wxButton(this, wxID_ANY, L("Начать тест"), wxDefaultPosition, wxSize(-1, 64));
         start_->SetFont(start_->GetFont().Larger().Bold());
         root->Add(start_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 18);
@@ -475,7 +687,7 @@ public:
         policiesBox_ = new wxCheckListBox(this, wxID_ANY, wxDefaultPosition, wxSize(540, 145));
         for (auto& p : policies_) {
             policiesBox_->Append(wxString::Format("%02d", p.id) + wxString::FromUTF8(" · ") + (p.reason.empty() ? "" : L("[не поддерживается] ")) + p.arguments.Left(90));
-            policiesBox_->Check(p.id - 1, p.reason.empty());
+            policiesBox_->Check(p.id - 1, p.reason.empty() && config_.ReadBool(wxString::Format("selected_policy/%d", p.id), true));
         }
         policyColumn->Add(policiesBox_, 1, wxEXPAND); selection->Add(policyColumn, 2, wxRIGHT | wxEXPAND, 12);
         auto groupColumn = new wxBoxSizer(wxVERTICAL);
@@ -514,23 +726,14 @@ public:
         auto dnsRow = new wxBoxSizer(wxHORIZONTAL);
         dnsRow->Add(new wxStaticText(this, wxID_ANY, "DNS"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
         dns_ = new wxChoice(this, wxID_ANY);
-#ifdef __WXMSW__
-        dnsValues_ = {"", "8.8.8.8", "1.1.1.1", "9.9.9.9", "77.88.8.8", "custom"};
-        dns_->Append(L("Системный")); dns_->Append("Google (8.8.8.8)");
-        dns_->Append("Cloudflare (1.1.1.1)"); dns_->Append("Quad9 (9.9.9.9)");
-        dns_->Append(L("Яндекс") + " (77.88.8.8)"); dns_->Append(L("Пользовательский"));
-        wxString savedDns = config_.Read("dns_server", "1.1.1.1");
-        int dnsSelection = static_cast<int>(dnsValues_.size()) - 1;
-        for (size_t i = 0; i + 1 < dnsValues_.size(); ++i) if (savedDns == dnsValues_[i]) dnsSelection = static_cast<int>(i);
-        dns_->SetSelection(dnsSelection);
-        customDns_ = new wxTextCtrl(this, wxID_ANY, dnsSelection == static_cast<int>(dnsValues_.size()) - 1 ? savedDns : "", wxDefaultPosition, wxSize(150, -1));
-#else
-        dnsValues_ = {""}; dns_->Append(L("Системный")); dns_->SetSelection(0);
-        customDns_ = new wxTextCtrl(this, wxID_ANY, "", wxDefaultPosition, wxSize(150, -1));
-#endif
+        dnsValues_ = DnsValues();
+        wxString savedDns = vpn ? initialDns : config_.Read("dns_server", "");
+        if (vpnSmoke_) wxGetEnv("HELLOBYE_TEST_DNS", &savedDns);
+        int dnsSelection = FillDnsChoice(dns_, savedDns);
+        customDns_ = new wxTextCtrl(this, wxID_ANY, dnsSelection == 5 ? savedDns : "", wxDefaultPosition, wxSize(150, -1));
         dnsRow->Add(dns_, 0, wxRIGHT, 8); dnsRow->Add(customDns_, 0);
         customDns_->Show(!dnsValues_.empty() && dnsValues_.back() == "custom" && dns_->GetSelection() == static_cast<int>(dnsValues_.size() - 1));
-        root->Add(dnsRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10); advanced_.push_back(root->GetItem(root->GetItemCount() - 1));
+        root->Add(dnsRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10); dnsRowItem_ = root->GetItem(root->GetItemCount() - 1); advanced_.push_back(dnsRowItem_);
         customSitesToggle_ = new wxButton(this, wxID_ANY, L("Свои сайты…"));
         root->Add(customSitesToggle_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10); advanced_.push_back(root->GetItem(root->GetItemCount() - 1));
         auto customRow = new wxBoxSizer(wxHORIZONTAL);
@@ -598,6 +801,17 @@ public:
         });
         policiesBox_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent& e) { auto& p = policies_[e.GetSelection()]; description_->SetValue(p.arguments + "\n" + p.reason); });
         start_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Begin(); });
+        networkMode_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+            if (phase_ != Idle) return;
+            sites_.clear(); selected_ = -1;
+            for (auto& run : runs_) {
+                run.complete = false; run.failed = false; run.results.clear(); run.diagnostic.clear();
+                run.status = L("Ожидает");
+                if (run.id == -1) run.name = L(networkMode_->GetSelection() == 1 ? "VPN без обхода (контроль)" : "Прокси без обхода (контроль)");
+            }
+            Summary(); Controls(true); Presentation(); gauge_->SetValue(0);
+            progress_->SetLabel(L("Нажмите на завершённую стратегию, чтобы применить её."));
+        });
         cancel_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Cancel(); });
         export_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Export(); });
         import_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
@@ -631,6 +845,9 @@ public:
             bool valid = !full_ && !policiesBox_->IsShown() && summary_->IsShown();
             SetEnglish(true, false); LanguageChanged();
             valid = valid && start_->GetLabel() == "Start test" && mode_->GetLabel() == "Full version";
+            valid = valid && networkMode_->IsShown() && networkMode_->GetCount() == 2 &&
+                networkMode_->GetString(0) == "SOCKS5 proxy" &&
+                networkMode_->GetString(1) == wxString::FromUTF8("VPN — all applications");
             full_ = true; Presentation(); valid = valid && policiesBox_->IsShown() && details_->IsShown();
             valid = valid && customSitesToggle_->IsShown() && customPolicyToggle_->IsShown() &&
                 !custom_->IsShown() && !customPolicy_->IsShown();
@@ -653,30 +870,45 @@ public:
             } else valid = false;
             if (!valid) { fprintf(stderr, "Tester UI mode/language/sorting check failed\n"); EndModal(wxID_CANCEL); return; }
             for (size_t i = 0; i < groups_.size(); ++i) groupsBox_->Check(i, false);
-            for (size_t i = 0; i < policies_.size(); ++i) policiesBox_->Check(i, i == 59);
+            for (size_t i = 0; i < policies_.size(); ++i) policiesBox_->Check(i, vpnSmoke_ ? (i == 10 || i == 13) : i == 59);
             custom_->SetValue(smokeURL + "/ok\n" + smokeURL + "/denied");
+            if (vpnSmoke_) custom_->AppendText("\nhttps://example.com/\nhttps://youtube.com/");
             timeout_->SetValue(5); attempts_->SetValue(1); parallel_->SetValue(2); sni_->SetValue("ya.ru");
             Begin();
         });
     }
     ~Tester() override {
         timer_.Stop(); batch_.reset();
+#ifdef __APPLE__
+        if (tunnelStarted_) {
+            if (configuring_ && tunnelFuture_.valid()) { try { tunnelFuture_.get(); } catch (...) {} }
+            VpnStopMacTunnel(stopFile_);
+        }
+#else
+        if (configuring_ && tunnelFuture_.valid()) { try { tunnelFuture_.get(); } catch (...) {} }
+        if (tunnelStarted_) { try { VpnCleanup(device_); } catch (...) {} }
+        if (tunnelPid_) { wxProcess::Kill(tunnelPid_, wxSIGKILL); tunnelProcess_->Detach(); }
+#endif
         if (pid_) { wxProcess::Kill(pid_, wxSIGKILL); process_->Detach(); }
     }
     wxString Chosen() const { return chosen_; }
+    bool ChosenVpn() const { return networkMode_->GetSelection() == 1; }
+    wxString ChosenDns() const { return DnsServer(); }
     int SmokeResult() const { return smokeResult_; }
 };
 }
-PolicyChoice ShowPolicyTests(wxWindow* parent) {
+PolicyChoice ShowPolicyTests(wxWindow* parent, bool vpn, const wxString& dns) {
     try {
-        Tester dialog(parent);
-        if (dialog.ShowModal() == wxID_OK) return {true, dialog.Chosen()};
+        Tester dialog(parent, "", false, vpn, dns);
+        if (dialog.ShowModal() == wxID_OK) {
+            return {true, dialog.Chosen(), dialog.ChosenVpn(), dialog.ChosenDns()};
+        }
     } catch (const std::exception& e) { wxMessageBox(W(e.what()), L("Тест политик"), wxOK | wxICON_ERROR, parent); }
     return {false, ""};
 }
-int RunPolicyUISmoke(wxWindow* parent, const wxString& localBaseURL, bool applyEarly) {
+int RunPolicyUISmoke(wxWindow* parent, const wxString& localBaseURL, bool applyEarly, bool vpn) {
     try {
-        Tester dialog(parent, localBaseURL, applyEarly);
+        Tester dialog(parent, localBaseURL, applyEarly, vpn);
         int result = dialog.ShowModal();
         return result == wxID_OK && !dialog.Chosen().empty() ? dialog.SmokeResult() : 1;
     } catch (const std::exception& e) { fprintf(stderr, "%s\n", e.what()); return 1; }

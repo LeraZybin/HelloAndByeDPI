@@ -18,6 +18,9 @@
 #include "policy_test.h"
 #include "ui.h"
 #include "app_paths.h"
+#include "diagnostics.h"
+#include "dns_choice.h"
+#include "vpn_preflight.h"
 #if defined(__WXMSW__) || defined(__APPLE__)
 #include "vpn.h"
 #endif
@@ -51,7 +54,13 @@ class MainFrame : public wxFrame {
     wxTextCtrl *arguments_ = nullptr, *log_ = nullptr;
     wxSpinCtrl* port_;
     wxChoice* profile_;
-    wxChoice *language_, *favorites_, *catalog_, *networkMode_;
+    wxChoice *language_, *favorites_, *catalog_, *networkMode_, *dns_;
+    wxTextCtrl* customDns_;
+    wxSizerItem* dnsRow_ = nullptr;
+    wxString DnsServer() const {
+        int selected = dns_->GetSelection();
+        return selected == 5 ? customDns_->GetValue() : DnsValues()[selected];
+    }
     wxButton *mode_, *favoriteButton_, *customButton_;
     wxStaticText *currentPolicy_, *catalogLabel_;
     wxBoxSizer* root_;
@@ -111,6 +120,7 @@ class MainFrame : public wxFrame {
         toggle_->SetMinSize(wxSize(-1, full_ ? 44 : 76));
         mode_->SetLabel(L(full_ ? "Простая версия" : "Полная версия"));
         restore_->Show(full_ || (proxy_ && proxy_->Pending()));
+        if (dnsRow_) dnsRow_->Show(networkMode_->GetSelection() == 1);
         SetMinSize(wxSize(full_ ? 760 : 560, full_ ? 700 : 580));
         SetSize(full_ ? wxSize(800, 760) : wxSize(700, 650));
         Layout();
@@ -123,6 +133,7 @@ class MainFrame : public wxFrame {
         for (unsigned i = 0; i < 4; ++i) profile_->SetString(i, L(names[i]));
         networkMode_->SetString(0, L("Системный прокси"));
         if (networkMode_->GetCount() > 1) networkMode_->SetString(1, L("VPN — все приложения"));
+        TranslateDnsChoice(dns_);
         RefreshCatalog(); RefreshFavorites(); Presentation();
     }
     wxStaticText *status_, *address_;
@@ -165,7 +176,7 @@ class MainFrame : public wxFrame {
     }
     void InitializeLog() {
 #ifdef __APPLE__
-        wxString directory = wxStandardPaths::Get().GetUserDataDir();
+        wxString directory = DiagnosticDirectory(wxStandardPaths::Get().GetUserDataDir());
         wxFileName::Mkdir(directory, 0700, wxPATH_MKDIR_FULL);
         logPath_ = directory + "/HelloAndByeDPI.log";
 #else
@@ -191,6 +202,7 @@ class MainFrame : public wxFrame {
         config_.Write("port", port_->GetValue());
         config_.Write("automatic_proxy", automatic_->GetValue());
         config_.Write("vpn_mode", VpnAvailable() && networkMode_->GetSelection() == 1);
+        config_.Write("vpn_dns", DnsServer());
         config_.Flush();
     }
     void Editable(bool enable) {
@@ -199,6 +211,7 @@ class MainFrame : public wxFrame {
         automatic_->Enable(enable);
         test_->Enable(enable); favorites_->Enable(enable); catalog_->Enable(enable);
         networkMode_->Enable(enable);
+        dns_->Enable(enable); customDns_->Enable(enable);
         favoriteButton_->Enable(enable); customButton_->Enable(enable);
     }
     bool RestoreProxy() {
@@ -255,7 +268,7 @@ class MainFrame : public wxFrame {
         std::vector<wxString> args{executable.GetFullPath(), "--device",
             "tun://HelloAndByeDPI?guid={A18F60A0-0D7B-4A41-925E-BA2DAB87C847}",
             "--proxy", wxString::Format("socks5://127.0.0.1:%d", port_->GetValue()),
-            "--mtu", "1500", "--loglevel", "warning"};
+            "--mtu", "1500", "--loglevel", DiagnosticLogging() ? "debug" : "warning"};
         std::vector<const wchar_t*> argv; for (const auto& arg : args) argv.push_back(arg.wc_str()); argv.push_back(nullptr);
         wxString command; for (const auto& arg : args) command += wxString(command.empty() ? "" : " ") + "\"" + arg + "\"";
         Event("tun2socks command: " + command);
@@ -278,11 +291,12 @@ class MainFrame : public wxFrame {
         vpnStatusFile_ = wxString::Format("/tmp/org.helloandbyedpi.%lu.status", static_cast<unsigned long>(wxGetProcessId()));
         const wxString proxy = wxString::Format("socks5://127.0.0.1:%d", port_->GetValue());
         const wxString device = vpnDevice_, tunnel = executable.GetFullPath(), physical = vpnPhysical_.interfaceName;
-        const wxString stop = vpnStopFile_, status = vpnStatusFile_, log = logPath_;
+        const wxString stop = vpnStopFile_, status = vpnStatusFile_, log = logPath_, dns = ValidateDns(DnsServer());
         Event("Requesting macOS VPN authorization for " + device + " through " + physical);
-        vpnFuture_ = std::async(std::launch::async, [tunnel, device, proxy, physical, stop, status, log] {
+        Event("VPN DNS: " + (dns.empty() ? "system" : dns));
+        vpnFuture_ = std::async(std::launch::async, [tunnel, device, proxy, physical, stop, status, log, dns] {
             return VpnStartMacTunnel(tunnel, device, proxy, physical,
-                static_cast<unsigned long>(wxGetProcessId()), stop, status, log);
+                static_cast<unsigned long>(wxGetProcessId()), stop, status, log, dns);
         });
         vpnConfiguring_ = true; vpnStarting_ = false; vpnTicks_ = 0;
         toggle_->Disable();
@@ -292,6 +306,10 @@ class MainFrame : public wxFrame {
     void Start() {
         Event("Turn on requested");
         vpnActive_ = VpnAvailable() && networkMode_->GetSelection() == 1;
+        if (vpnActive_) {
+            wxString diagnostic;
+            if (!VpnPreflight(this, diagnostic)) { Event(diagnostic); vpnActive_ = false; return; }
+        }
 #ifdef __WXMSW__
         if (vpnActive_ && !VpnIsAdministrator()) {
             Save(); Event("VPN requires administrator rights; requesting elevation");
@@ -306,6 +324,7 @@ class MainFrame : public wxFrame {
         if (!RestoreProxy()) return;
         std::vector<std::string> parsed;
         try {
+            if (vpnActive_) ValidateDns(DnsServer());
             parsed = parseArguments(arguments_->GetValue().ToStdString(wxConvUTF8),
 #ifdef __APPLE__
                 true
@@ -335,7 +354,7 @@ class MainFrame : public wxFrame {
         // its reliably persisted HTTP/HTTPS proxy representation.
         std::vector<wxString> args = {engine.GetFullPath(),
             "--ip", "socks5://127.0.0.1", "--ip", "http://127.0.0.1",
-            "--port", wxString::Format("%d", port_->GetValue()), "--debug", "0"};
+            "--port", wxString::Format("%d", port_->GetValue()), "--debug", DiagnosticLogging() ? "1" : "0"};
 #ifdef __WXMSW__
         // Windows has no TCP_INFO check for pending split segments here.
         // Waiting makes disorder independent of debug-output timing and the
@@ -450,10 +469,10 @@ class MainFrame : public wxFrame {
                 vpnStarting_ = false; vpnConfiguring_ = true;
                 status_->SetLabel(L("Настройка VPN-адреса и маршрутов…"));
                 Event("VPN adapter appeared; configuring address, DNS and routes in background");
-                wxString device = vpnDevice_;
-                vpnFuture_ = std::async(std::launch::async, [device] {
+                wxString device = vpnDevice_, dns = ValidateDns(DnsServer());
+                vpnFuture_ = std::async(std::launch::async, [device, dns] {
                     wxString log = "Cleanup before configuration: " + VpnCleanup(device) + "\n";
-                    try { return log + VpnConfigure(device, "1.1.1.1"); }
+                    try { return log + VpnConfigure(device, dns); }
                     catch (...) { VpnCleanup(device); throw; }
                 });
             } else if (vpnTicks_ >= 100) { Event("VPN adapter did not appear within 10 seconds"); Stop(); }
@@ -533,6 +552,18 @@ class MainFrame : public wxFrame {
         FinishProcesses();
     }
 public:
+    void OpenPolicyTests(bool vpn) {
+        if (!RestoreProxy()) return;
+        auto choice = ShowPolicyTests(this, vpn, DnsServer()); LanguageChanged();
+        if (choice.selected) {
+            networkMode_->SetSelection(choice.vpn ? 1 : 0);
+            dns_->Clear(); int selected = FillDnsChoice(dns_, choice.dns);
+            customDns_->SetValue(selected == 5 ? choice.dns : ""); customDns_->Show(selected == 5);
+            Presentation();
+            arguments_->SetValue(choice.arguments); profile_->SetSelection(0); AddFavorite(); Save();
+            Log(L("Выбранная политика сохранена. Нажмите «Включить».\n"));
+        }
+    }
     void RunElevatedVpn() {
         if (networkMode_->GetCount() > 1) networkMode_->SetSelection(1); Save();
         CallAfter([this] { Start(); });
@@ -546,6 +577,10 @@ public:
                 ((!VpnAvailable() && networkMode_->GetCount() == 1) ||
                  (VpnAvailable() && networkMode_->GetCount() == 2 &&
                   networkMode_->GetString(1) == wxString::FromUTF8("VPN — all applications")));
+            networkMode_->SetSelection(1); Presentation();
+            valid = valid && dns_->IsShown() && dns_->GetCount() == 6 && dns_->GetString(0) == "System";
+            dns_->SetSelection(2); valid = valid && DnsServer() == "1.1.1.1";
+            networkMode_->SetSelection(0); Presentation();
             full_ = true; Presentation();
             valid = valid && arguments_->IsShown() && log_->IsShown();
             fprintf(stderr, "Main full content: %d x %d; client: %d x %d\n", root_->GetMinSize().x, root_->GetMinSize().y, GetClientSize().x, GetClientSize().y);
@@ -558,8 +593,8 @@ public:
             Destroy();
         });
     }
-    void RunTesterSmoke(const wxString& localBaseURL, bool applyEarly = false) {
-        CallAfter([this, localBaseURL, applyEarly] { smokeResult = RunPolicyUISmoke(this, localBaseURL, applyEarly); Destroy(); });
+    void RunTesterSmoke(const wxString& localBaseURL, bool applyEarly = false, bool vpn = false) {
+        CallAfter([this, localBaseURL, applyEarly, vpn] { smokeResult = RunPolicyUISmoke(this, localBaseURL, applyEarly, vpn); Destroy(); });
     }
     void RunSmoke() {
         closing_ = true;
@@ -607,6 +642,21 @@ public:
         networkMode_->SetSelection(VpnAvailable() && config_.ReadBool("vpn_mode", false) ? 1 : 0);
         networkRow->Add(networkMode_, 1);
         root->Add(networkRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 18);
+        auto dnsRow = new wxBoxSizer(wxHORIZONTAL);
+        dnsRow->Add(new wxStaticText(panel, wxID_ANY, "DNS"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+        dns_ = new wxChoice(panel, wxID_ANY);
+#ifdef __WXMSW__
+        wxString savedDns = config_.Read("vpn_dns", "1.1.1.1");
+#else
+        wxString savedDns = config_.Read("vpn_dns", "");
+#endif
+        int dnsSelection = FillDnsChoice(dns_, savedDns);
+        customDns_ = new wxTextCtrl(panel, wxID_ANY, dnsSelection == 5 ? savedDns : "");
+        customDns_->Show(dnsSelection == 5);
+        dnsRow->Add(dns_, 1, wxRIGHT, 8); dnsRow->Add(customDns_, 1);
+        root->Add(dnsRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 18); dnsRow_ = root->GetItem(root->GetItemCount() - 1);
+        dns_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { customDns_->Show(dns_->GetSelection() == 5); Layout(); });
+        networkMode_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { Presentation(); });
         catalogLabel_ = new wxStaticText(panel, wxID_ANY, L("Все стратегии и параметры"));
         root->Add(catalogLabel_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
         catalog_ = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxSize(200, -1));
@@ -707,12 +757,7 @@ public:
         });
         toggle_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if (pid_) Stop(); else Start(); });
         test_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            if (!RestoreProxy()) return;
-            auto choice = ShowPolicyTests(this); LanguageChanged();
-            if (choice.selected) {
-                arguments_->SetValue(choice.arguments); profile_->SetSelection(0); AddFavorite(); Save();
-                Log(L("Выбранная политика сохранена. Нажмите «Включить».\n"));
-            }
+            OpenPolicyTests(networkMode_->GetSelection() == 1);
         });
         restore_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             if (RestoreProxy()) {
@@ -749,15 +794,17 @@ public:
     bool OnInit() override {
         systemProxySmoke = argc > 1 && wxString(argv[1]) == "--system-proxy-smoke-test";
         startVpnElevated = argc > 1 && wxString(argv[1]) == "--start-vpn";
+        bool vpnTests = argc > 1 && wxString(argv[1]) == "--test-vpn";
         bool uiSmoke = argc > 1 && wxString(argv[1]) == "--ui-smoke-test";
         bool earlySmoke = argc == 3 && wxString(argv[1]) == "--policy-ui-apply-smoke-test";
-        bool testerSmoke = earlySmoke || (argc == 3 && wxString(argv[1]) == "--policy-ui-smoke-test");
+        bool vpnSmoke = argc == 3 && wxString(argv[1]) == "--policy-ui-vpn-smoke-test";
+        bool testerSmoke = earlySmoke || vpnSmoke || (argc == 3 && wxString(argv[1]) == "--policy-ui-smoke-test");
         smokeTest = uiSmoke || systemProxySmoke || testerSmoke || (argc > 1 && wxString(argv[1]) == "--smoke-test");
         LoadLanguage();
         SetAppDisplayName("HelloAndByeDPI");
         // Retain the storage identity so an earlier recovery journal remains discoverable.
         SetAppName(smokeTest && !systemProxySmoke ? "ByeDPI Desktop Test" : "ByeDPI Desktop");
-        if (!startVpnElevated) {
+        if (!startVpnElevated && !vpnTests) {
             instance_.reset(new wxSingleInstanceChecker(GetAppName() + "-" + wxGetUserId()));
             if (instance_->IsAnotherRunning()) {
                 wxMessageBox(L("ByeDPI уже запущен. Используйте открытое окно приложения."));
@@ -765,9 +812,10 @@ public:
             }
         }
         auto frame = new MainFrame(); frame->Show();
-        if (startVpnElevated) frame->RunElevatedVpn();
+        if (vpnTests) frame->CallAfter([frame] { frame->OpenPolicyTests(true); });
+        else if (startVpnElevated) frame->RunElevatedVpn();
         else if (uiSmoke) frame->RunUISmoke();
-        else if (testerSmoke) frame->RunTesterSmoke(wxString(argv[2]), earlySmoke);
+        else if (testerSmoke) frame->RunTesterSmoke(wxString(argv[2]), earlySmoke, vpnSmoke);
         else if (smokeTest) frame->RunSmoke();
         return true;
     }

@@ -1,4 +1,5 @@
 #include "http_probe.h"
+#include "diagnostic_mode.h"
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -59,6 +60,21 @@ std::string CsvCell(const std::string& text) {
     return result + '"';
 }
 
+void ClassifyProbeResult(ProbeResult& result, const std::string& transportError) {
+    // Apple's system curl can report receive error 56 instead of write error
+    // 23 when our callback stops a large HTTP/2 response at the body cap.
+    // Only our callback can set sampleLimited. Uncapped network/TLS failures
+    // and truncated responses must still fail even if HTTP 200 was received.
+    const bool transferred = result.transportCode == CURLE_OK || result.sampleLimited;
+    result.responded = transferred && result.http > 0;
+    result.available = result.responded && result.http >= 200 && result.http < 400;
+    result.error.clear();
+    if (!transferred) result.error = transportError;
+    else if (!result.available) result.error = "HTTP " + std::to_string(result.http);
+}
+
+std::string ProbeRuntime() { return curl_version(); }
+
 namespace {
 struct CurlLifetime {
     CurlLifetime() { if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) throw std::runtime_error("Не удалось инициализировать HTTPS."); }
@@ -70,6 +86,13 @@ struct Job {
     ProbeResult result;
     char error[CURL_ERROR_SIZE] = {};
     size_t bytes = 0;
+    static int Debug(CURL*, curl_infotype type, char* data, size_t size, void* userdata) {
+        auto job = static_cast<Job*>(userdata);
+        // Connection and TLS diagnostics only; exclude HTTP headers and bodies.
+        if (type == CURLINFO_TEXT && job->result.diagnostic.size() < 8192)
+            job->result.diagnostic.append(data, std::min(size, 8192 - job->result.diagnostic.size()));
+        return 0;
+    }
     ~Job() { if (handle) curl_easy_cleanup(handle); if (resolve) curl_slist_free_all(resolve); }
     static size_t Receive(char*, size_t size, size_t count, void* userdata) {
         auto job = static_cast<Job*>(userdata);
@@ -86,10 +109,11 @@ struct ProbeBatch::Impl {
     std::vector<std::string> sites;
     int attempts, timeout, concurrency, port;
     std::string dnsServer;
+    bool ipv4Only;
     std::vector<ProbeResult> immediate;
     size_t next = 0;
-    Impl(const std::vector<std::string>& s, int a, int t, int c, int p, const std::string& dns) :
-        sites(s), attempts(a), timeout(t), concurrency(c), port(p), dnsServer(dns) {
+    Impl(const std::vector<std::string>& s, int a, int t, int c, int p, const std::string& dns, bool ipv4) :
+        sites(s), attempts(a), timeout(t), concurrency(c), port(p), dnsServer(dns), ipv4Only(ipv4) {
         if (a < 1 || a > 5 || t < 1 || t > 60 || c < 1 || c > 20 || p < 0 || p > 65535)
             throw std::runtime_error("Неверные настройки теста.");
         static CurlLifetime curl;
@@ -157,6 +181,12 @@ struct ProbeBatch::Impl {
             if (!job->handle) throw std::runtime_error("Не удалось создать HTTP-запрос.");
             auto h = job->handle;
             Option(h, CURLOPT_URL, job->result.url.c_str());
+            if (DiagnosticLogging()) {
+                Option(h, CURLOPT_VERBOSE, 1L);
+                Option(h, CURLOPT_DEBUGFUNCTION, &Job::Debug);
+                Option(h, CURLOPT_DEBUGDATA, job.get());
+            }
+            if (ipv4Only) Option(h, CURLOPT_IPRESOLVE, static_cast<long>(CURL_IPRESOLVE_V4));
             Option(h, CURLOPT_ERRORBUFFER, job->error);
             Option(h, CURLOPT_WRITEFUNCTION, &Job::Receive);
             Option(h, CURLOPT_WRITEDATA, job.get());
@@ -198,8 +228,8 @@ struct ProbeBatch::Impl {
         }
     }
 };
-ProbeBatch::ProbeBatch(const std::vector<std::string>& sites, int attempts, int timeout, int concurrency, int port, const std::string& dnsServer) :
-    impl_(new Impl(sites, attempts, timeout, concurrency, port, dnsServer)) {}
+ProbeBatch::ProbeBatch(const std::vector<std::string>& sites, int attempts, int timeout, int concurrency, int port, const std::string& dnsServer, bool ipv4Only) :
+    impl_(new Impl(sites, attempts, timeout, concurrency, port, dnsServer, ipv4Only)) {}
 ProbeBatch::~ProbeBatch() = default;
 bool ProbeBatch::Done() const { return impl_->jobs.empty() && impl_->immediate.empty() && impl_->next == impl_->sites.size() * impl_->attempts; }
 std::vector<ProbeResult> ProbeBatch::Poll() {
@@ -219,12 +249,14 @@ std::vector<ProbeResult> ProbeBatch::Poll() {
         curl_easy_getinfo(job.handle, CURLINFO_TOTAL_TIME, &seconds);
         job.result.milliseconds = seconds * 1000;
         job.result.transportCode = message->data.result;
-        bool transferred = message->data.result == CURLE_OK ||
-            (message->data.result == CURLE_WRITE_ERROR && job.result.sampleLimited);
-        job.result.responded = transferred && job.result.http > 0;
-        job.result.available = job.result.responded && job.result.http >= 200 && job.result.http < 400;
-        if (!transferred) job.result.error = job.error[0] ? job.error : curl_easy_strerror(message->data.result);
-        else if (!job.result.available) job.result.error = "HTTP " + std::to_string(job.result.http);
+        char* value = nullptr;
+        if (curl_easy_getinfo(job.handle, CURLINFO_PRIMARY_IP, &value) == CURLE_OK && value) job.result.remoteAddress = value;
+        if (curl_easy_getinfo(job.handle, CURLINFO_LOCAL_IP, &value) == CURLE_OK && value) job.result.localAddress = value;
+        if (curl_easy_getinfo(job.handle, CURLINFO_EFFECTIVE_URL, &value) == CURLE_OK && value) job.result.effectiveUrl = value;
+        curl_easy_getinfo(job.handle, CURLINFO_NAMELOOKUP_TIME, &seconds); job.result.dnsMilliseconds = seconds * 1000;
+        curl_easy_getinfo(job.handle, CURLINFO_CONNECT_TIME, &seconds); job.result.connectMilliseconds = seconds * 1000;
+        curl_easy_getinfo(job.handle, CURLINFO_APPCONNECT_TIME, &seconds); job.result.tlsMilliseconds = seconds * 1000;
+        ClassifyProbeResult(job.result, job.error[0] ? job.error : curl_easy_strerror(message->data.result));
         completed.push_back(job.result);
         curl_multi_remove_handle(impl_->multi, job.handle);
         impl_->jobs.erase(entry);

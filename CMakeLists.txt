@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(ByeDPI_Desktop VERSION 0.6.3 LANGUAGES C CXX)
+project(ByeDPI_Desktop VERSION 0.6.4 LANGUAGES C CXX)
+option(BYEDPI_TEST_BUILD "Mark the application as a test build" OFF)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)
@@ -14,6 +15,9 @@ enable_testing()
 add_executable(argument_tests tests/arguments.cpp)
 target_include_directories(argument_tests PRIVATE src)
 add_test(NAME arguments COMMAND argument_tests)
+add_executable(vpn_detection_tests tests/vpn_detection.cpp)
+target_include_directories(vpn_detection_tests PRIVATE src)
+add_test(NAME vpn_detection COMMAND vpn_detection_tests)
 add_executable(proxy_transaction_tests tests/proxy_transaction.cpp)
 target_include_directories(proxy_transaction_tests PRIVATE src)
 add_test(NAME proxy_transaction COMMAND proxy_transaction_tests)
@@ -79,7 +83,10 @@ add_test(NAME http_probe_model COMMAND http_probe_tests "${CMAKE_SOURCE_DIR}/dat
 add_executable(probe_integration tests/probe_integration.cpp)
 target_link_libraries(probe_integration PRIVATE http_probe)
 add_executable(ByeDPI WIN32 MACOSX_BUNDLE src/main.cpp src/proxy_journal.cpp src/policy_test.cpp)
-target_compile_definitions(ByeDPI PRIVATE BYEDPI_APP_VERSION="${PROJECT_VERSION}" BYEDPI_TEST_BUILD=1)
+target_compile_definitions(ByeDPI PRIVATE BYEDPI_APP_VERSION="${PROJECT_VERSION}")
+if(BYEDPI_TEST_BUILD)
+  target_compile_definitions(ByeDPI PRIVATE BYEDPI_TEST_BUILD=1)
+endif()
 if(WIN32)
   configure_file(src/app.rc.in ${CMAKE_CURRENT_BINARY_DIR}/app.rc @ONLY)
   target_sources(ByeDPI PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/app.rc src/system_proxy_win.cpp src/vpn_win.cpp)
@@ -119,6 +126,9 @@ if(APPLE)
   target_include_directories(mac_vpn_tests PRIVATE src)
   target_link_libraries(mac_vpn_tests PRIVATE wx::base "-framework SystemConfiguration")
   add_test(NAME mac_vpn_physical_network COMMAND mac_vpn_tests)
+  add_executable(vpn_network_mac tests/vpn_network_mac.cpp src/vpn_mac.cpp)
+  target_include_directories(vpn_network_mac PRIVATE src)
+  target_link_libraries(vpn_network_mac PRIVATE wx::base http_probe "-framework SystemConfiguration")
 endif()
 if(MINGW)
   target_link_options(ByeDPI PRIVATE -static -static-libgcc -static-libstdc++)
@@ -128,8 +138,8 @@ set_target_properties(ByeDPI PROPERTIES
   OUTPUT_NAME "HelloAndByeDPI"
   MACOSX_BUNDLE_ICON_FILE "icon.icns"
   MACOSX_BUNDLE_BUNDLE_NAME "HelloAndByeDPI"
-  MACOSX_BUNDLE_BUNDLE_VERSION "0.6.3"
-  MACOSX_BUNDLE_SHORT_VERSION_STRING "0.6.3")
+  MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+  MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
 add_dependencies(ByeDPI ciadpi)
 add_custom_command(TARGET ByeDPI POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ciadpi> $<TARGET_FILE_DIR:ByeDPI>

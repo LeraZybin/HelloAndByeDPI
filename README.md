@@ -1,5 +1,7 @@
 # HelloAndByeDPI
 
+Current version: **0.6.4**.
+
 HelloAndByeDPI is a native desktop GUI for [ByeDPI](https://github.com/hufrea/byedpi). It runs a local anti-DPI proxy, applies the required network settings automatically, and restores the previous settings when disconnected.
 
 The interface is available in English and Russian.
@@ -31,6 +33,8 @@ On macOS, the permission prompt appears once when VPN mode starts. The privilege
 The application includes 60 strategies and the site lists from [romanvht/ByeByeDPI](https://github.com/romanvht/ByeByeDPI).
 
 Open **Strategy test**, select the site lists, and start the test. Results are sorted by the number of accessible sites and median response time. Select a completed strategy to apply it. Custom site lists and custom strategies are supported in the full interface.
+
+Disconnect other VPNs before starting VPN mode or strategy tests. The application checks for an active VPN and asks you to turn it off.
 
 Test results depend on the provider, network, and active DPI equipment. A strategy that succeeds on one connection may fail on another.
 

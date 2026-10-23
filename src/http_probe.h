@@ -9,7 +9,13 @@ struct ProbeResult {
     long http = 0;
     double milliseconds = 0;
     bool available = false, responded = false, sampleLimited = false;
+    std::string remoteAddress, localAddress, effectiveUrl, diagnostic;
+    double dnsMilliseconds = 0, connectMilliseconds = 0, tlsMilliseconds = 0;
 };
+std::string ProbeRuntime();
+// sampleLimited is set only by our body callback when it deliberately stops
+// reading after enough response bytes have been received.
+void ClassifyProbeResult(ProbeResult& result, const std::string& transportError);
 std::vector<std::string> ParseSites(const std::string& text);
 double Median(std::vector<double> values);
 std::string CsvCell(const std::string& text);
@@ -21,7 +27,7 @@ class ProbeBatch {
     std::unique_ptr<Impl> impl_;
 public:
     ProbeBatch(const std::vector<std::string>& sites, int attempts, int timeoutSeconds,
-               int concurrency, int socksPort, const std::string& dnsServer = ""); // 0 = direct baseline
+               int concurrency, int socksPort, const std::string& dnsServer = "", bool ipv4Only = false); // 0 = OS routing
     ~ProbeBatch();
     std::vector<ProbeResult> Poll();
     bool Done() const;

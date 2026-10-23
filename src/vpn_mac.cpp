@@ -1,4 +1,6 @@
 #include "vpn.h"
+#include "diagnostics.h"
+#include "vpn_detection.h"
 
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <arpa/inet.h>
@@ -83,10 +85,80 @@ wxString PrimaryInterface() {
     CFRelease(value);
     return valid ? wxString::FromUTF8(bytes) : wxString();
 }
+
+wxString NetworkService(const wxString& interfaceName) {
+    SCPreferencesRef preferences = SCPreferencesCreate(nullptr, CFSTR("HelloAndByeDPI"), nullptr);
+    if (!preferences) throw std::runtime_error("Could not read network services.");
+    CFArrayRef services = SCNetworkServiceCopyAll(preferences);
+    wxString result;
+    if (services) {
+        for (CFIndex i = 0; i < CFArrayGetCount(services); ++i) {
+            SCNetworkServiceRef service = static_cast<SCNetworkServiceRef>(const_cast<void*>(CFArrayGetValueAtIndex(services, i)));
+            SCNetworkInterfaceRef interface = SCNetworkServiceGetInterface(service);
+            CFStringRef bsd = interface ? SCNetworkInterfaceGetBSDName(interface) : nullptr;
+            char name[IFNAMSIZ] = {}, label[1024] = {};
+            CFStringRef display = SCNetworkServiceGetName(service);
+            if (SCNetworkServiceGetEnabled(service) && bsd && display &&
+                CFStringGetCString(bsd, name, sizeof(name), kCFStringEncodingUTF8) &&
+                wxString::FromUTF8(name) == interfaceName &&
+                CFStringGetCString(display, label, sizeof(label), kCFStringEncodingUTF8)) {
+                result = wxString::FromUTF8(label); break;
+            }
+        }
+        CFRelease(services);
+    }
+    CFRelease(preferences);
+    if (result.empty()) throw std::runtime_error("Could not find the physical network service for DNS.");
+    return result;
+}
 }
 
 bool VpnIsAdministrator() { return geteuid() == 0; }
-bool VpnRelaunchElevated(const wxString&) { return false; }
+bool VpnRelaunchElevated(const wxString&, bool) { return false; }
+
+wxString VpnFindActiveTunnel() {
+    // Also catch connected split-tunnel services whose routes may not include
+    // any of the public probe addresses below.
+    SCPreferencesRef preferences = SCPreferencesCreate(nullptr, CFSTR("HelloAndByeDPI"), nullptr);
+    CFArrayRef services = preferences ? SCNetworkServiceCopyAll(preferences) : nullptr;
+    wxString connected;
+    if (services) {
+        for (CFIndex i = 0; i < CFArrayGetCount(services); ++i) {
+            auto service = static_cast<SCNetworkServiceRef>(const_cast<void*>(CFArrayGetValueAtIndex(services, i)));
+            auto interface = SCNetworkServiceGetInterface(service);
+            auto type = interface ? SCNetworkInterfaceGetInterfaceType(interface) : nullptr;
+            if (!type || !(CFEqual(type, kSCNetworkInterfaceTypePPP) ||
+                CFEqual(type, kSCNetworkInterfaceTypeIPSec) || CFEqual(type, CFSTR("VPN")))) continue;
+            auto connection = SCNetworkConnectionCreateWithServiceID(nullptr, SCNetworkServiceGetServiceID(service), nullptr, nullptr);
+            if (!connection) continue;
+            const auto state = SCNetworkConnectionGetStatus(connection);
+            CFRelease(connection);
+            if (state != kSCNetworkConnectionConnected && state != kSCNetworkConnectionConnecting) continue;
+            char name[1024] = {};
+            auto label = SCNetworkServiceGetName(service);
+            connected = label && CFStringGetCString(label, name, sizeof(name), kCFStringEncodingUTF8)
+                ? wxString::FromUTF8(name) : wxString("VPN");
+            break;
+        }
+        CFRelease(services);
+    }
+    if (preferences) CFRelease(preferences);
+    if (!connected.empty()) return connected;
+    // Merely having utun interfaces is normal on macOS. Only block when one
+    // actually routes public traffic; idle Apple/other VPN adapters are harmless.
+    for (const char* destination : {"1.1.1.1", "208.67.222.222", "8.8.8.8"}) {
+        const std::string command = std::string("/sbin/route -n get ") + destination + " 2>&1";
+        FILE* pipe = popen(command.c_str(), "r");
+        if (!pipe) throw std::runtime_error("Cannot query the routing table.");
+        std::string output; char buffer[1024];
+        while (fgets(buffer, sizeof(buffer), pipe)) output += buffer;
+        const int status = pclose(pipe);
+        const std::string interface = MacRouteInterface(output);
+        if (status != 0 || interface.empty()) throw std::runtime_error("No IPv4 route for VPN preflight.");
+        if (MacTunnelInterface(interface)) return wxString::FromUTF8(interface);
+    }
+    return "";
+}
 
 VpnPhysicalNetwork VpnFindPhysicalNetwork() {
     wxString preferred = PrimaryInterface();
@@ -133,28 +205,80 @@ wxString VpnCleanup(const wxString&) {
     return "utun routes are removed with the adapter";
 }
 
-wxString VpnStartMacTunnel(const wxString& tun2socks, const wxString& deviceName,
+wxString VpnMacTunnelScript(const wxString& tun2socks, const wxString& deviceName,
     const wxString& proxy, const wxString& physicalInterface, unsigned long parentPid,
-    const wxString& stopFile, const wxString& statusFile, const wxString& logFile) {
+    const wxString& stopFile, const wxString& statusFile, const wxString& logFile,
+    const wxString& dnsServer) {
     ValidateInterface(deviceName); ValidateInterface(physicalInterface);
     const std::string tun = ShellQuote(tun2socks), device = ShellQuote(deviceName);
     const std::string stop = ShellQuote(stopFile), status = ShellQuote(statusFile), log = ShellQuote(logFile);
+    std::string dnsSetup, dnsCleanup;
+    if (!dnsServer.empty()) {
+        in_addr parsed = {};
+        if (inet_pton(AF_INET, Utf8(dnsServer).c_str(), &parsed) != 1)
+            throw std::runtime_error("DNS must be an IPv4 address.");
+        const std::string service = ShellQuote(NetworkService(physicalInterface)), dns = ShellQuote(dnsServer);
+        dnsSetup = "old_dns=$(/usr/sbin/networksetup -getdnsservers " + service + ") || exit 1; "
+            "echo 'Saving original DNS for ' " + service + "; printf '%s\\n' \"$old_dns\"; "
+            "dns_changed=1; /usr/sbin/networksetup -setdnsservers " + service + " " + dns + " || exit 1; "
+            "echo 'Applied DNS: ' " + dns + "; ";
+        dnsCleanup = "if [ \"$dns_changed\" = 1 ]; then "
+            "current_dns=$(/usr/sbin/networksetup -getdnsservers " + service + "); "
+            "if [ \"$current_dns\" = " + dns + " ]; then "
+            "case \"$old_dns\" in *'There aren'*|'') /usr/sbin/networksetup -setdnsservers " + service + " Empty ;; "
+            "*) set -- $old_dns; /usr/sbin/networksetup -setdnsservers " + service + " \"$@\" ;; esac; "
+            "dns_restore_status=$?; if [ \"$dns_restore_status\" = 0 ]; then echo 'Original DNS restored'; "
+            "else echo 'ERROR: original DNS restore failed'; fi; "
+            "else echo 'DNS changed externally; leaving current settings'; fi; fi; ";
+    }
+    const std::string physical = ShellQuote(physicalInterface);
+    // IP_BOUND_IF sockets need an explicitly scoped route once the unscoped /1
+    // routes point into utun. A plain default alone stops working at that point.
+    const std::string routeSetup =
+        "physical_route=$(/sbin/route -n get -ifscope " + physical + " default 2>&1); "
+        "physical_gateway=$(printf '%s\\n' \"$physical_route\" | /usr/bin/awk '/gateway:/ {print $2}'); "
+        "physical_device=$(printf '%s\\n' \"$physical_route\" | /usr/bin/awk '/interface:/ {print $2}'); "
+        "[ -n \"$physical_gateway\" ] && [ \"$physical_device\" = " + physical +
+        " ] || { echo 'ERROR: no physical IPv4 default gateway'; exit 1; }; "
+        "case \"$physical_route\" in *IFSCOPE*) echo 'Reusing scoped physical default';; "
+        "*) /sbin/route -n add -ifscope " + physical + " default \"$physical_gateway\" || exit 1; "
+        "physical_route_added=1; echo 'Added scoped physical default via ' \"$physical_gateway\";; esac; ";
+    const std::string routeCleanup =
+        "if [ \"$physical_route_added\" = 1 ]; then "
+        "/sbin/route -n delete -ifscope " + physical + " default \"$physical_gateway\"; "
+        "if [ $? = 0 ]; then echo 'Scoped physical default removed'; "
+        "else echo 'ERROR: scoped physical default cleanup failed'; fi; fi; ";
+    const std::string cleanup = "[ -z \"$child\" ] || { kill $child 2>/dev/null; wait $child 2>/dev/null; }; " + dnsCleanup + routeCleanup + "echo stopped > " + status;
     const std::string command =
         "cd /; rm -f " + stop + " " + status + "; ( "
-        "trap 'kill $child 2>/dev/null; wait $child 2>/dev/null' EXIT TERM INT; " +
+        "child=''; dns_changed=0; physical_route_added=0; trap " + ShellQuote(wxString::FromUTF8(cleanup)) + " EXIT TERM INT; " + routeSetup + dnsSetup +
         tun + " --device " + device + " --proxy " + ShellQuote(proxy) + " --interface " +
-        ShellQuote(physicalInterface) + " --mtu 1500 --loglevel warning >> " + log + " 2>&1 & child=$!; "
+        ShellQuote(physicalInterface) + " --mtu 1500 --loglevel " +
+        (DiagnosticLogging() ? "debug" : "warning") + " >> " + log + " 2>&1 & child=$!; "
         "i=0; while [ $i -lt 100 ] && ! /sbin/ifconfig " + device + " >/dev/null 2>&1; do "
         "kill -0 $child 2>/dev/null || exit 1; i=$((i+1)); sleep 0.1; done; "
         "kill -0 $child 2>/dev/null || exit 1; "
         "/sbin/ifconfig " + device + " inet 198.18.0.1 198.18.0.1 up && "
         "/sbin/route -n add -net 0.0.0.0/1 -interface " + device + " && "
         "(/sbin/route -n add -net 128.0.0.0/1 -interface " + device +
-        " || { /sbin/route -n delete -net 0.0.0.0/1 -interface " + device + "; exit 1; }) && "
-        "echo ready > " + status + "; "
-        "while kill -0 " + std::to_string(parentPid) + " 2>/dev/null && [ ! -e " + stop + " ]; do sleep 1; done "
+        " || { /sbin/route -n delete -net 0.0.0.0/1 -interface " + device + "; exit 1; }) || exit 1; "
+        "physical_check=$(/sbin/route -n get -ifscope " + physical + " 1.1.1.1 2>&1); "
+        "printf '%s\\n' \"$physical_check\"; "
+        "physical_device=$(printf '%s\\n' \"$physical_check\" | /usr/bin/awk '/interface:/ {print $2}'); "
+        "[ \"$physical_device\" = " + physical + " ] || { echo 'ERROR: physical egress route lost'; exit 1; }; "
+        "echo ready > " + status + " || exit 1; "
+        "while kill -0 $child 2>/dev/null && kill -0 " + std::to_string(parentPid) + " 2>/dev/null && [ ! -e " + stop + " ]; do sleep 1; done "
         ") >> " + log + " 2>&1 < /dev/null &";
-    return RunAppleScript("do shell script " + AppleScriptQuote(command) + " with administrator privileges");
+    return wxString::FromUTF8(command);
+}
+
+wxString VpnStartMacTunnel(const wxString& tun2socks, const wxString& deviceName,
+    const wxString& proxy, const wxString& physicalInterface, unsigned long parentPid,
+    const wxString& stopFile, const wxString& statusFile, const wxString& logFile,
+    const wxString& dnsServer) {
+    return RunAppleScript("do shell script " + AppleScriptQuote(Utf8(VpnMacTunnelScript(tun2socks,
+        deviceName, proxy, physicalInterface, parentPid, stopFile, statusFile, logFile, dnsServer))) +
+        " with administrator privileges");
 }
 
 bool VpnMacTunnelReady(const wxString& statusFile) {
@@ -164,6 +288,14 @@ bool VpnMacTunnelReady(const wxString& statusFile) {
     const bool ready = std::fgets(value, sizeof(value), file) && std::string(value).find("ready") == 0;
     std::fclose(file);
     return ready;
+}
+
+bool VpnMacTunnelStopped(const wxString& statusFile) {
+    FILE* file = std::fopen(Utf8(statusFile).c_str(), "r");
+    if (!file) return false;
+    char value[16] = {};
+    const bool stopped = std::fgets(value, sizeof(value), file) && std::string(value).find("stopped") == 0;
+    std::fclose(file); return stopped;
 }
 
 void VpnStopMacTunnel(const wxString& stopFile) {

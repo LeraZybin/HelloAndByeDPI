@@ -1,4 +1,5 @@
 #include "vpn.h"
+#include "vpn_detection.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -76,10 +77,41 @@ bool VpnIsAdministrator() {
     return member != FALSE;
 }
 
-bool VpnRelaunchElevated(const wxString& executable) {
-    HINSTANCE result = ShellExecuteW(nullptr, L"runas", executable.wc_str(), L"--start-vpn",
+bool VpnRelaunchElevated(const wxString& executable, bool policyTests) {
+    HINSTANCE result = ShellExecuteW(nullptr, L"runas", executable.wc_str(), policyTests ? L"--test-vpn" : L"--start-vpn",
         wxString(executable).BeforeLast('\\').wc_str(), SW_SHOWNORMAL);
     return reinterpret_cast<INT_PTR>(result) > 32;
+}
+
+wxString VpnFindActiveTunnel() {
+    ULONG size = 16384, status = ERROR_BUFFER_OVERFLOW;
+    std::vector<unsigned char> storage;
+    for (int attempt = 0; attempt < 3 && status == ERROR_BUFFER_OVERFLOW; ++attempt) {
+        storage.resize(size);
+        status = GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr,
+            reinterpret_cast<PIP_ADAPTER_ADDRESSES>(storage.data()), &size);
+    }
+    if (status != NO_ERROR) throw Error("Could not inspect active VPN adapters", status);
+    std::vector<DWORD> routed;
+    for (const char* target : {"1.1.1.1", "208.67.222.222", "8.8.8.8"}) {
+        in_addr address = {}; inet_pton(AF_INET, target, &address);
+        MIB_IPFORWARDROW route = {};
+        status = GetBestRoute(address.s_addr, 0, &route);
+        if (status != NO_ERROR) throw Error("Could not check the current route", status);
+        routed.push_back(route.dwForwardIfIndex);
+    }
+    for (auto item = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(storage.data()); item; item = item->Next) {
+        if (item->OperStatus != IfOperStatusUp || !item->FirstUnicastAddress) continue;
+        const wxString name = item->FriendlyName ? wxString(item->FriendlyName) : "";
+        const wxString description = item->Description ? wxString(item->Description) : "";
+        const std::string label = (name + " " + description).ToStdString(wxConvUTF8);
+        const bool selected = std::find(routed.begin(), routed.end(), item->IfIndex) != routed.end();
+        // Ignore unrelated built-in transition tunnels (e.g. Teredo), but catch
+        // connected named VPN adapters even when they use split routing.
+        if (WindowsTunnelAdapter(selected ? item->IfType : 0, label) || item->IfType == IF_TYPE_PPP)
+            return name.empty() ? description : name;
+    }
+    return "";
 }
 
 VpnPhysicalNetwork VpnFindPhysicalNetwork() {
@@ -124,6 +156,7 @@ wxString VpnConfigure(const wxString&, const wxString& dnsServer) {
         L"source=static", L"address=198.18.0.1", L"mask=255.255.255.0", L"gateway=none"}), true) + "\n";
     std::vector<wxString> dns{L"netsh.exe", L"interface", L"ipv4", L"set", L"dnsservers",
         L"name=HelloAndByeDPI", L"source=static", "address=" + dnsServer, L"register=none", L"validate=no"};
+    if (dnsServer.empty()) dns = Netsh({L"interface", L"ipv4", L"set", L"dnsservers", L"name=HelloAndByeDPI", L"source=dhcp"});
     log += Run(dns, true) + "\n";
     log += Run(Netsh({L"interface", L"ipv4", L"add", L"route", L"prefix=0.0.0.0/1",
         L"interface=HelloAndByeDPI", L"nexthop=198.18.0.1", L"metric=1", L"store=active"}), true) + "\n";

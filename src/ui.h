@@ -16,6 +16,10 @@ inline void SetEnglish(bool value, bool save = true) { English() = value; if (sa
 // active Windows code page (which turns Russian text into "Рџ...").
 inline wxString L(const char* text) {
     static const char* dictionary[][2] = {
+    {"Сторонний VPN включён", "Another VPN is active"},
+    {"Обнаружен включённый сторонний VPN. Выключите его перед запуском VPN или теста стратегий и повторите попытку.", "Another VPN is active. Turn it off before starting the VPN or strategy tests, then try again."},
+    {"Проверка подключения", "Connection check"},
+    {"Не удалось проверить, включён ли сторонний VPN. Проверьте подключение к сети и повторите попытку.", "Could not check whether another VPN is active. Check your network connection and try again."},
     {"Включить", "Turn on"},
     {"Отключить", "Turn off"},
     {"Полная версия", "Full version"},
@@ -143,6 +147,8 @@ inline wxString L(const char* text) {
     {"Избранные стратегии", "Favorite strategies"},
     {"Режим подключения", "Connection mode"},
     {"Системный прокси", "System proxy"},
+    {"SOCKS5-прокси", "SOCKS5 proxy"},
+    {"VPN без обхода (контроль)", "VPN without bypass (baseline)"},
     {"VPN — все приложения", "VPN — all applications"},
     {"Для VPN-режима нужны права администратора.", "VPN mode requires administrator rights."},
     {"Создание VPN-адаптера…", "Creating VPN adapter…"},
